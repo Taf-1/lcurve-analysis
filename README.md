@@ -57,7 +57,7 @@ Copy and edit `example_config.ini`:
 
 ```ini
 [paths]
-data_root     = /path/to/output/directory
+data_root     = /path/to/data/directory
 ultracam_dat  = /path/to/target_ultracam.fits
 ngts_dat      = /path/to/target_ngts.fits
 example_model = /path/to/lcurve/example/model
