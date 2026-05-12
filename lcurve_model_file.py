@@ -95,7 +95,7 @@ class claret_tables_interp:
 
     def comp_limb_darkening(self) -> tuple[float, float, float, float]:
         data = self.query_vizier(self.logger, "J/A+A/546/A14/limb6")
-        mask = (data["Filter"] == self.filt) & (data["Mod"] == 'qs')
+        mask = (data["Filt"] == self.filt) & (data["Mod"] == 'qs')
         filt_data = data[mask]
         a1, a2, a3, a4 = self.itp(self.logger, filt_data, self.comp_logg, self.comp_temp, 'ldc')
         return a1, a2, a3, a4

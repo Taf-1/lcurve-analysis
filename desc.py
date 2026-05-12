@@ -144,7 +144,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         os.makedirs(pathname)
 
     band_order = [2, 1, 3]
-    band_names = {1: 'u', 2: 'g', 3: 'i'}
+    band_names = {1: "u'", 2: "g'", 3: "i'"}
 
     results = {}
     reference_model = None

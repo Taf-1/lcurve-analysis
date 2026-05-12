@@ -15,7 +15,6 @@ from logger import sf_logging
 from lcurve_commands import lcurve
 from lcurve_data_files import create_data_file, save_data_file
 from lcurve_model_file import adjust_parameters
-import plotting 
 
 def arg_parse() -> ap.Namespace:
     p = ap.ArgumentParser()
