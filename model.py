@@ -62,6 +62,8 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
         ("t0", "0.505", 2), ("t0", "0.001", 3), ("t0", "1", 5),
         ("q", "0", 5),
         ("ldc1_1", "0", 5), ("ldc1_2", "0", 5), ("ldc1_3", "0", 5), ("ldc1_4", "0", 5),
+        ("ldc2_1", "0", 5), ("ldc2_2", "0", 5), ("ldc2_3", "0", 5), ("ldc2_4", "0", 5),
+        ("gravity_dark1", "0", 5), ("gravity_dark2", "0", 5), 
         ("tperiod", "1", 2),
         ("iangle", geom, 5),
         ("r1",     geom, 5),
