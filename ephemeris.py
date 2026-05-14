@@ -124,12 +124,15 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         os.makedirs(pathname)
 
     config = f"{pathname}/{tar_name}_ultracam_model_file_3"
+    period_val = None
     with open(config, "r") as f:
         for line in f:
             parts = line.split()
             if len(parts) >= 3 and parts[0] == "period" and parts[1] == "=":
                 period_val = float(parts[2])
                 break
+    if period_val is None:
+        raise RuntimeError(f"Could not find 'period' in {config}")
     logger.info(f"Period from Ultracam model: {period_val:.10f} days")
 
     time, cadence, flux, flux_err, t0_nearby = create_data_file(

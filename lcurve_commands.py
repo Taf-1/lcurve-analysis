@@ -1,5 +1,8 @@
+import os
 import subprocess
 import logging
+
+_ENV = {**os.environ, "PGPLOT_DEV": "/null"}
 
 NMAX = "200000"
 DELTA = "0.01"
@@ -11,6 +14,7 @@ NFILE = "1"
 DEVICE = "/null"
 FTOL = "1e-09"
 NMAX_simplex = "100000"
+FTOL_simplex = "1e-05"
 ALINE = '1'
 TAU = '0.01'
 EFAC = '0.6'
@@ -28,14 +32,14 @@ class lcurve:
 
     def simplex(self) -> None:
         try:
-            subprocess.run(["simplex", self.MODEL, self.DATA, FTOL, NMAX, self.OUTPUT], check=True)
+            subprocess.run(["simplex", self.MODEL, self.DATA, FTOL_simplex, NMAX_simplex, self.OUTPUT], check=True, env=_ENV)
         except subprocess.CalledProcessError as e:
             self.logger.info(f"simplex failed: {e}")
             raise RuntimeError(f"simplex failed: {e}")
 
     def levmarq(self) -> None:
         try:
-            subprocess.run(["levmarq", self.MODEL, self.DATA, NMAX, DELTA, LMAX, SCALE, self.OUTPUT], check=True)
+            subprocess.run(["levmarq", self.MODEL, self.DATA, NMAX, DELTA, LMAX, SCALE, self.OUTPUT], check=True, env=_ENV)
         except subprocess.CalledProcessError as e:
             self.logger.info(f"levmarq failed with code {e.returncode}: {e.cmd}")
             raise RuntimeError(f"levmarq failed with code {e.returncode}: {e.cmd}")

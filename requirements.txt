@@ -1,0 +1,8 @@
+numpy==1.26.4
+scipy==1.17.1
+astropy==7.2.0
+astropy-iers-data==0.2026.5.11.1.8.52
+astroquery==0.4.11
+matplotlib==3.10.9
+emcee==3.1.6
+corner==2.2.3

@@ -119,6 +119,7 @@ def run_model(logger: logging.Logger, filename: str, band_index: int, t0: float,
 
     ultracam_prelim = f"{pathname}/{tar_name}_ultracam_model_file_{band_index}"
     lcurve(logger, model_config, output, ultracam_prelim).simplex()
+    lcurve(logger, ultracam_prelim, output, ultracam_prelim).levmarq()
 
     model_dat = f"{pathname}/desc_model_{band_index}"
     lcurve(logger, ultracam_prelim, output, model_dat).lroche()

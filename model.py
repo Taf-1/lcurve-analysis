@@ -37,6 +37,8 @@ def read_ephemeris(config: str) -> tuple[str, str]:
                     period.append(parts[2])
                 elif parts[0] == "t0":
                     t0.append(parts[2])
+    if not period or not t0:
+        raise RuntimeError(f"Could not find 'period' and/or 't0' in {config}")
     return period[0], t0[0]
 
 def bin_data_on_phase(phase: np.ndarray, flux: np.ndarray, flux_err: np.ndarray, binfact: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
