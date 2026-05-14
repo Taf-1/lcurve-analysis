@@ -47,8 +47,9 @@ class create_data_file:
         flux_err = f_err / np.nanmedian(f)
         self.logger.info(f"Loaded {len(time)} data points")
         self.logger.info(f"Time range: {time.min():.6f} to {time.max():.6f} BMJD (TDB)")
-        t0_tdb = Time(float(self.t0), format='jd', scale='tdb').mjd
-        n_cycles = (round((time.min() - t0_tdb) / self.period))
+        t0_tdb   = Time(float(self.t0), format='jd', scale='tdb').mjd
+        t_mid    = (time.min() + time.max()) / 2.0
+        n_cycles = round((t_mid - t0_tdb) / self.period)
         t0_nearby = t0_tdb + n_cycles * self.period
         return time, cadence, flux, flux_err, t0_nearby
 

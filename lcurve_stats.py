@@ -1,7 +1,6 @@
 import logging
 import numpy as np
 import os
-import shutil
 import sys
 import uuid
 from lcurve_commands import lcurve

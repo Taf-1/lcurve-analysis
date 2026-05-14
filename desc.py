@@ -49,18 +49,18 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         ("t2", geom, 5),
         ("absorb", geom, 5),
         # WD limb darkening: set value and lock
-        ("ldc1_1", f"{a1}", 2), ("ldc1_1", "0", 5),
-        ("ldc1_2", f"{a2}", 2), ("ldc1_2", "0", 5),
-        ("ldc1_3", f"{a3}", 2), ("ldc1_3", "0", 5),
-        ("ldc1_4", f"{a4}", 2), ("ldc1_4", "0", 5),
+        ("ldc1_1", f"{a1}", 2), ("ldc1_1", "1", 5),
+        ("ldc1_2", f"{a2}", 2), ("ldc1_2", "1", 5),
+        ("ldc1_3", f"{a3}", 2), ("ldc1_3", "1", 5),
+        ("ldc1_4", f"{a4}", 2), ("ldc1_4", "1", 5),
         # Companion limb darkening: set value and lock
-        ("ldc2_1", f"{a1c}", 2), ("ldc2_1", "0", 5),
-        ("ldc2_2", f"{a2c}", 2), ("ldc2_2", "0", 5),
-        ("ldc2_3", f"{a3c}", 2), ("ldc2_3", "0", 5),
-        ("ldc2_4", f"{a4c}", 2), ("ldc2_4", "0", 5),
+        ("ldc2_1", f"{a1c}", 2), ("ldc2_1", "1", 5),
+        ("ldc2_2", f"{a2c}", 2), ("ldc2_2", "1", 5),
+        ("ldc2_3", f"{a3c}", 2), ("ldc2_3", "1", 5),
+        ("ldc2_4", f"{a4c}", 2), ("ldc2_4", "1", 5),
         # Gravity darkening: set value and lock
-        ("gravity_dark1", f"{y1}", 2), ("gravity_dark1", "0", 5),
-        ("gravity_dark2", f"{y2}", 2), ("gravity_dark2", "0", 5),
+        ("gravity_dark1", f"{y1}", 2), ("gravity_dark1", "1", 5),
+        ("gravity_dark2", f"{y2}", 2), ("gravity_dark2", "1", 5),
         # 3-part lines: wavelength and tperiod
         ("wavelength", f"{wavelength}", 2),
         ("tperiod", f"{period:.10f}", 2),
@@ -144,7 +144,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         os.makedirs(pathname)
 
     band_order = [2, 1, 3]
-    band_names = {1: 'u', 2: 'g', 3: 'i'}
+    band_names = {1: "u'", 2: "g'", 3: "i'"}
 
     results = {}
     reference_model = None

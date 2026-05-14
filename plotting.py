@@ -121,7 +121,7 @@ class lcurve_model_plot:
                 x_data = res['phase']
                 x_model = res['phase_model']
                 xlim = (0, 1)
-                xlabel = r"Phase ($\sigma$)"
+                xlabel = r"Phase ($\phi$)"
             else:
                 x_data = res['time'] - res['t0_nearby']
                 x_model = res['time_model']

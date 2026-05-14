@@ -15,7 +15,6 @@ from logger import sf_logging
 from lcurve_commands import lcurve
 from lcurve_data_files import create_data_file, save_data_file
 from lcurve_model_file import adjust_parameters
-import plotting 
 
 def arg_parse() -> ap.Namespace:
     p = ap.ArgumentParser()
@@ -137,10 +136,15 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         logger, pathname, filename, 1, t0_input, period_val
     ).extract_ngts_data()
 
+    t_mid = 0.5 * (time.min() + time.max())
+    n_mid = round((t_mid - t0_nearby) / period_val)
+    t0_mid = t0_nearby + n_mid * period_val
+    logger.info(f"Recentred reference epoch: t0_nearby={t0_nearby:.10f} -> t0_mid={t0_mid:.10f} (cycle {n_mid})")
+
     output = f"{pathname}/{tar_name}_ngts_data_file"
     save_data_file(
         logger, tar_name, 1, time,
-        np.full(len(time), cadence), flux, flux_err, t0_nearby, output
+        np.full(len(time), cadence), flux, flux_err, t0_mid, output
     ).write_data_file()
 
     new_model = load_model_params(logger, config, tar_name, pathname)
@@ -208,7 +212,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     if "t0" in names:
         t0_idx = names.index("t0")
-        t0_abs = param_med[t0_idx] + t0_nearby
+        t0_abs = param_med[t0_idx] + t0_mid
         t0_abs_err = param_std[t0_idx]
         logger.info(f"Absolute t0 = {t0_abs:.10f} ± {t0_abs_err:.10f} BMJD (TDB)")
 
@@ -222,7 +226,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         fo.write("-" * 68 + "\n")
         for label, med, lo, hi in zip(names, medians, lowers, uppers):
             if label == "t0":
-                fo.write(f"{label:<30} {med + t0_nearby:>12.4f} {lo:>12.4f} {hi:>12.4f}\n")
+                fo.write(f"{label:<30} {med + t0_mid:>12.4f} {lo:>12.4f} {hi:>12.4f}\n")
             else:
                 fo.write(f"{label:<30} {med:>12.4f} {lo:>12.4f} {hi:>12.4f}\n")
     logger.info(f"Saved: {txt_file}")
@@ -241,9 +245,9 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(time_model, flux_model, 'r-', lw=2, label='Best-fit model', zorder=5)
-    ax.errorbar(time - t0_nearby, flux, yerr=flux_err,
+    ax.errorbar(time - t0_mid, flux, yerr=flux_err,
                 fmt='k.', ms=2, alpha=0.5, label='NGTS data', zorder=3)
-    ax.set_xlabel(f"Time from t0_nearby = {t0_nearby:.6f} (days)")
+    ax.set_xlabel(f"Time from t0_mid = {t0_mid:.6f} (days)")
     ax.set_ylabel("Normalized Flux")
     ax.legend()
     ax.grid(alpha=0.3)

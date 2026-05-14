@@ -37,7 +37,7 @@ For the gravity darkening 1 & 2, Claret et al. 2020 gives J/A+A/634/A93/tabley f
 """
 import logging
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from astroquery.vizier import Vizier
 from astropy.table import Table
 
@@ -60,29 +60,23 @@ class claret_tables_interp:
 
     @staticmethod
     def itp(logger: logging.Logger, filt_data: Table, logg: float, temp: float, coef: str) -> tuple[float, ...]:
-        filt_data = filt_data[np.lexsort((filt_data['Teff'], filt_data['logg']))]
-        logg_unique = np.unique(filt_data['logg'])
-        teff_unique = np.unique(filt_data['Teff'])
-        n_logg = len(logg_unique)
-        n_teff = len(teff_unique)
+        points = np.column_stack([np.array(filt_data['logg']), np.array(filt_data['Teff'])])
+        query  = np.array([[logg, temp]])
+
+        def interp_param(col: str) -> float:
+            values = np.array(filt_data[col], dtype=float)
+            val = LinearNDInterpolator(points, values)(query)[0]
+            if np.isnan(val):
+                val = NearestNDInterpolator(points, values)(query)[0]
+                logger.info(f"{col}: outside convex hull, using nearest neighbour")
+            return float(val)
+
         if coef == "ldc":
-            interp = {}
-            for param in ['a1', 'a2', 'a3', 'a4']:
-                values_grid = filt_data[param].reshape(n_logg, n_teff)
-                interp[param] = RegularGridInterpolator((logg_unique, teff_unique), values_grid)
-            a1 = interp['a1']([[logg, temp]])[0]
-            a2 = interp['a2']([[logg, temp]])[0]
-            a3 = interp['a3']([[logg, temp]])[0]
-            a4 = interp['a4']([[logg, temp]])[0]
+            a1, a2, a3, a4 = (interp_param(p) for p in ['a1', 'a2', 'a3', 'a4'])
             logger.info(f"Interpolated to get the {coef} coefficients via the Claret 4-term law")
             return a1, a2, a3, a4
         else:
-            interp = {}
-            for param in ["y1", "y2"]:
-                values_grid = filt_data[param].reshape(n_logg, n_teff)
-                interp[param] = RegularGridInterpolator((logg_unique, teff_unique), values_grid)
-            y1 = interp['y1']([[logg, temp]])[0]
-            y2 = interp['y2']([[logg, temp]])[0]
+            y1, y2 = (interp_param(p) for p in ['y1', 'y2'])
             logger.info(f"Interpolated to get the {coef} coefficients via the Claret 2-term law")
             return y1, y2
 
@@ -95,7 +89,7 @@ class claret_tables_interp:
 
     def comp_limb_darkening(self) -> tuple[float, float, float, float]:
         data = self.query_vizier(self.logger, "J/A+A/546/A14/limb6")
-        mask = (data["Filter"] == self.filt) & (data["Mod"] == 'qs')
+        mask = (data["Filt"] == self.filt) & (data["Mod"] == 'qs')
         filt_data = data[mask]
         a1, a2, a3, a4 = self.itp(self.logger, filt_data, self.comp_logg, self.comp_temp, 'ldc')
         return a1, a2, a3, a4
