@@ -13,8 +13,9 @@ import astropy.units as u
 from logger import sf_logging
 from lcurve_commands import lcurve
 from lcurve_model_file import adjust_parameters
-from lcurve_stats import Jacobian, q_i_degeneracy
+from lcurve_stats import Jacobian, q_i_degeneracy, parabola
 from lcurve_rv_calc import xshooter_params
+from scipy.optimize import curve_fit
 from plotting import lcurve_model_plot, stats_plots
 import plotting
 
@@ -161,7 +162,7 @@ def run_levmarq_model(logger, filename: str, band_index: int, pathname: str, tar
     phase_model, flux_model, _      = np.loadtxt(model_dat, usecols=(0, 2, 3), unpack=True)
     return ultracam_prelim, phase, flux_norm, flux_err_norm, phase_model, flux_model
 
-def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, logger: logging.Logger) -> float:
+def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, i_prior: tuple[float, float] | None, logger: logging.Logger) -> float:
     if params is None or not np.all(np.isfinite(params)):
         return -np.inf
 
@@ -172,11 +173,15 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, logge
         q0, q_err, _, _ = xshooter_params(logger, rv_config, []).q_n_velocityscale()
         lp += -0.5 * ((p["q"] - q0) / q_err) ** 2
 
-    if not (80   < p["iangle"] < 88):    return -np.inf
-    if not (0.01 < p["r1"]     < 0.03):  return -np.inf
-    if not (0.25 < p["r2"]     < 0.5):   return -np.inf
-    if not (7000 < p["t1"]     < 15000): return -np.inf
-    if not (1500 < p["t2"]     < 4000):  return -np.inf
+    if i_prior is not None:
+        i_mean, i_sigma = i_prior
+        lp += -0.5 * ((p["iangle"] - i_mean) / i_sigma) ** 2
+
+    if not (75    < p["iangle"] < 90):    return -np.inf
+    if not (0.009 < p["r1"]     < 0.03):  return -np.inf
+    if not (0.1   < p["r2"]     < 0.35):  return -np.inf
+    if not (7000  < p["t1"]     < 15000): return -np.inf
+    if not (1500  < p["t2"]     < 4000):  return -np.inf
 
     return lp
 
@@ -239,8 +244,8 @@ def log_likelihood(params: np.ndarray, names: list[str], data_dir: str, rv_confi
 
     return total_ll
 
-def log_probability(params: np.ndarray, names: list[str], data_dir: str, rv_config: str | None, gaia_id: str, band_order: list[int], logger: logging.Logger) -> float:
-    lp = log_prior(params, names, rv_config, logger)
+def log_probability(params: np.ndarray, names: list[str], data_dir: str, rv_config: str | None, gaia_id: str, band_order: list[int], i_prior: tuple[float, float] | None, logger: logging.Logger) -> float:
+    lp = log_prior(params, names, rv_config, i_prior, logger)
     if not np.isfinite(lp):
         return -np.inf
     return lp + log_likelihood(params, names, data_dir, rv_config, gaia_id, band_order, logger)
@@ -433,6 +438,19 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     sp.chi2_2d_map()
     sp.marginalised_profile()
 
+    chi2_marginal_i = np.min(delta_chi2, axis=0)
+    delta_i         = chi2_marginal_i - chi2_marginal_i.min()
+    try:
+        p0_i = [1.0, i_vals[np.argmin(delta_i)], 0.0]
+        popt_i, _ = curve_fit(parabola, i_vals, delta_i, p0=p0_i)
+        i_mean_prior  = float(popt_i[1])
+        i_sigma_prior = 1.0 / np.sqrt(abs(popt_i[0]))
+        i_prior = (i_mean_prior, i_sigma_prior)
+        logger.info(f"Inclination prior from chi2 map: i = {i_mean_prior:.3f} ± {i_sigma_prior:.3f} deg")
+    except Exception as e:
+        logger.info(f"Could not derive inclination prior from chi2 map: {e} — using box prior only")
+        i_prior = None
+
     names   = results[band_order[0]]["names"]
     p_best  = results[2]["p_best"]
 
@@ -443,10 +461,10 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     nwalkers    = max(4 * ndim, 32)
     p0          = p_best + steps_mcmc * np.random.randn(nwalkers, ndim)
 
-    with Pool(processes=24) as pool:
+    with Pool(processes=32) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_probability,
-            args=(names, data_dir, rv_config, gaia_id, band_order, logger),
+            args=(names, data_dir, rv_config, gaia_id, band_order, i_prior, logger),
             pool=pool
         )
         sampler.run_mcmc(p0, mcmc_steps, progress=True)
