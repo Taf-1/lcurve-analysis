@@ -58,13 +58,20 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
     new_config = f"{path}/{method}_model_ultracam_model_file_{band_idx}"
     geom = "0" if fix_geometry else "1"
 
+    ldc_gravity_fixes = []
+    with open(config, "r") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 6 and parts[1] == "=":
+                name = parts[0]
+                if name.startswith("ldc") or name.startswith("gravity_"):
+                    ldc_gravity_fixes.append((name, "0", 5))
+
     changes = [
         ("period", "1.0", 2), ("period", "0", 5),
         ("t0", "0.505", 2), ("t0", "0.001", 3), ("t0", "1", 5),
         ("q", "0", 5),
-        ("ldc1_1", "0", 5), ("ldc1_2", "0", 5), ("ldc1_3", "0", 5), ("ldc1_4", "0", 5),
-        ("ldc2_1", "0", 5), ("ldc2_2", "0", 5), ("ldc2_3", "0", 5), ("ldc2_4", "0", 5),
-        ("gravity_dark1", "0", 5), ("gravity_dark2", "0", 5), 
+        *ldc_gravity_fixes,
         ("tperiod", "1", 2),
         ("iangle", geom, 5),
         ("r1",     geom, 5),
@@ -179,7 +186,7 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, i_pri
 
     if not (75    < p["iangle"] < 90):    return -np.inf
     if not (0.009 < p["r1"]     < 0.03):  return -np.inf
-    if not (0.1   < p["r2"]     < 0.35):  return -np.inf
+    if not (0.09   < p["r2"]     < 0.3):  return -np.inf
     if not (7000  < p["t1"]     < 15000): return -np.inf
     if not (1500  < p["t2"]     < 4000):  return -np.inf
 
@@ -306,6 +313,8 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     flux_data     = {}
     flux_err_data = {}
 
+    band_binfacts = {1: 2, 2: 2, 3: 3}
+
     fig = plt.figure(figsize=(10, 12))
     gs  = fig.add_gridspec(3, 1, height_ratios=[1, 1, 1], hspace=0.05)
 
@@ -324,7 +333,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         logger.info(f"Band {band_idx}: adjusted t0 = {t0_adj:.10f}")
 
         t_fold = ((time - t0_adj) % period) / period
-        phase_bin, flux_bin, flux_err_bin = bin_data_on_phase(t_fold, flux, flux_err, binfact)
+        phase_bin, flux_bin, flux_err_bin = bin_data_on_phase(t_fold, flux, flux_err, band_binfacts[band_idx])
 
         orig_dat  = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
         bin_width = 1.0 / len(phase_bin)
@@ -376,6 +385,29 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_simplex", results_simplex).lc_with_model(use_phase=True)
     plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_simplex", results_simplex)
+
+    results_levmarq = {}
+    reference_model_levmarq = None
+
+    for band_idx in band_order:
+        filename = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
+        levmarq_model_file, phase, flux_norm, flux_err_norm, phase_model, flux_model = run_levmarq_model(
+            logger, filename, band_idx, data_dir, gaia_id, rv_config, reference_model_levmarq
+        )
+        results_levmarq[band_idx] = {
+            'phase':       phase,
+            'flux':        flux_norm,
+            'flux_err':    flux_err_norm,
+            'phase_model': phase_model,
+            'flux_model':  flux_model,
+            't0_nearby':   0.0,
+        }
+        if band_idx == 2:
+            reference_model_levmarq = levmarq_model_file
+            logger.info("Using g-band geometry for subsequent levmarq fits")
+
+    lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_levmarq", results_levmarq).lc_with_model(use_phase=True)
+    plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_levmarq", results_levmarq)
 
     results = {}
     for band_idx in band_order:

@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from multiprocessing import Pool
 from logger import sf_logging
 from lcurve_commands import lcurve
-from lcurve_data_files import create_data_file, save_data_file
+from lcurve_data_files import create_data_file, save_data_file, adjust_data_file
 from lcurve_model_file import adjust_parameters
 
 def arg_parse() -> ap.Namespace:
@@ -136,6 +136,10 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         logger, pathname, filename, 1, t0_input, period_val
     ).extract_ngts_data()
 
+    time, flux, flux_err = adjust_data_file(time, flux, flux_err, 8).bin_data_on_time()
+    cadence *= 8
+    logger.info(f"Binned NGTS data by factor 8: {len(time)} points remaining")
+
     t_mid = 0.5 * (time.min() + time.max())
     n_mid = round((t_mid - t0_nearby) / period_val)
     t0_mid = t0_nearby + n_mid * period_val
@@ -162,11 +166,11 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     mcmc_steps    = 20000
     ndim          = len(p_best)
-    nwalkers      = 4 * ndim
+    nwalkers      = 4 * 4 * ndim
     initial_spread = 0.01 * steps
     p0            = p_best + initial_spread * np.random.randn(nwalkers, ndim)
 
-    with Pool(processes=8) as pool:
+    with Pool(processes=32) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_probability,
             args=(names, time - t0_nearby, flux, flux_err, output, base_lines, logger),
