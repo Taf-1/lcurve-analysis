@@ -33,8 +33,6 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
     t0 = float(t0)
     geom = "0" if fix_geometry else "1"
 
-    # Each entry: (param_name, value, position_index)
-    # Repeat a name with different indices to set both value (2) and fit flag (5)
     changes = [
         # Always-fixed parameters
         ("q", "0", 5),
@@ -70,8 +68,8 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         changes += [("period", "0", 5), ("t0", "0", 5)]
     else:
         changes += [
-            ("period", f"{period}", 2), ("period", "1", 5),
-            ("t0", f"{t0:.10f}", 2), ("t0", "1", 5),
+            ("period", f"{period}", 2), ("period", "0.0001", 3), ("period", "1", 5),
+            ("t0", f"{t0:.10f}", 2), ("t0", "0.001", 3), ("t0", "1", 5),
         ]
 
     names   = [c[0] for c in changes]

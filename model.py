@@ -64,13 +64,15 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
             parts = line.split()
             if len(parts) >= 6 and parts[1] == "=":
                 name = parts[0]
-                if name.startswith("ldc") or name.startswith("gravity_"):
+                if (name.startswith("ldc") or name.startswith("gravity_")) and name != "gravity_dark2":
                     ldc_gravity_fixes.append((name, "0", 5))
 
     changes = [
         ("period", "1.0", 2), ("period", "0", 5),
-        ("t0", "0.505", 2), ("t0", "0.001", 3), ("t0", "1", 5),
+        ("t0", "0.505", 2), ("t0", "0.005", 3), ("t0", "1", 5),
         ("q", "0", 5),
+        ("absorb",        "1", 5),
+        ("gravity_dark2", "1", 5),
         *ldc_gravity_fixes,
         ("tperiod", "1", 2),
         ("iangle", geom, 5),
@@ -82,11 +84,11 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
 
     if not fix_geometry:
         changes += [
-            ("iangle", "0.003", 4),
-            ("r1",     "0.001", 4),
-            ("r2",     "0.03",  4),
-            ("t1",     "50",    3), ("t1", "5",   4),
-            ("t2",     "150",   3), ("t2", "100", 4),
+            ("iangle", "0.1",   3), ("iangle", "0.05",  4),
+            ("r1",     "0.0001", 3), ("r1",     "0.0005", 4),
+            ("r2",     "0.001", 3), ("r2",     "0.001",  4),
+            ("t1",     "10",    3), ("t1",     "5",      4),
+            ("t2",     "50",    3), ("t2",     "25",     4),
         ]
         if rv_config is not None:
             _, _, vs_value, _ = xshooter_params(logger, rv_config, []).q_n_velocityscale()
@@ -95,6 +97,11 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
             changes += [("velocity_scale", "0", 5)]
     else:
         changes += [("velocity_scale", "0", 5)]
+
+    changes += [
+        ("absorb",        "0.005", 3), ("absorb",        "0.001",  4),
+        ("gravity_dark2", "0.002", 3), ("gravity_dark2", "0.005", 4),
+    ]
 
     names   = [c[0] for c in changes]
     values  = [c[1] for c in changes]
@@ -169,7 +176,7 @@ def run_levmarq_model(logger, filename: str, band_index: int, pathname: str, tar
     phase_model, flux_model, _      = np.loadtxt(model_dat, usecols=(0, 2, 3), unpack=True)
     return ultracam_prelim, phase, flux_norm, flux_err_norm, phase_model, flux_model
 
-def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, i_prior: tuple[float, float] | None, logger: logging.Logger) -> float:
+def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, i_prior: tuple[float, float] | None, a_r_sun: float, period: float, logger: logging.Logger) -> float:
     if params is None or not np.all(np.isfinite(params)):
         return -np.inf
 
@@ -179,6 +186,15 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, i_pri
     if rv_config is not None:
         q0, q_err, _, _ = xshooter_params(logger, rv_config, []).q_n_velocityscale()
         lp += -0.5 * ((p["q"] - q0) / q_err) ** 2
+
+        rvs       = xshooter_params(logger, rv_config, []).load_rv_parameters()
+        k2_obs    = rvs["K2"][0]
+        k2_err    = rvs["K2"][1]
+        a_m       = a_r_sun * const.R_sun.value
+        P_s       = period * 86400.0
+        i_rad     = np.radians(p["iangle"])
+        k2_model  = 2 * np.pi * a_m * np.sin(i_rad) / (P_s * (1 + p["q"])) / 1e3
+        lp += -0.5 * ((k2_model - k2_obs) / k2_err) ** 2
 
     if i_prior is not None:
         i_mean, i_sigma = i_prior
@@ -251,8 +267,8 @@ def log_likelihood(params: np.ndarray, names: list[str], data_dir: str, rv_confi
 
     return total_ll
 
-def log_probability(params: np.ndarray, names: list[str], data_dir: str, rv_config: str | None, gaia_id: str, band_order: list[int], i_prior: tuple[float, float] | None, logger: logging.Logger) -> float:
-    lp = log_prior(params, names, rv_config, i_prior, logger)
+def log_probability(params: np.ndarray, names: list[str], data_dir: str, rv_config: str | None, gaia_id: str, band_order: list[int], i_prior: tuple[float, float] | None, a_r_sun: float, period: float, logger: logging.Logger) -> float:
+    lp = log_prior(params, names, rv_config, i_prior, a_r_sun, period, logger)
     if not np.isfinite(lp):
         return -np.inf
     return lp + log_likelihood(params, names, data_dir, rv_config, gaia_id, band_order, logger)
@@ -266,22 +282,36 @@ def plot_ellipsoidal_signal(logger: logging.Logger, fig_name: str, results: dict
     phase_model = res['phase_model']
     flux_model  = res['flux_model']
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(phase_model, flux_model, 'k-', lw=2, zorder=5, label='Model')
-    ax.errorbar(phase, flux, yerr=flux_err, fmt='o', color='red',
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 4), gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.0})
+    ax1.plot(phase_model, flux_model, 'k-', lw=2, zorder=5, label='Model')
+    ax1.errorbar(phase, flux, yerr=flux_err, fmt='o', color='red',
                 markersize=3, alpha=0.7, zorder=3, label='i-band data')
 
     oot_flux = flux[flux > 0.85]
+    oot_mask = flux > 0.85
     if len(oot_flux) > 0:
-        ax.set_ylim(oot_flux.min() - 0.02, oot_flux.max() + 0.02)
-
-    ax.set_xlabel(r"Phase ($\phi$)")
-    ax.set_ylabel("Normalized Flux")
-    ax.set_xlim(0, 1)
-    ax.legend()
+        ax1.set_ylim(oot_flux.min() - 0.02, oot_flux.max() + 0.02)
+    rse = np.sqrt(np.sum((flux[oot_mask] - flux_model[oot_mask])**2) /
+                            (len(flux_model[oot_mask]) - 2))
+    residuals_sigma = (flux - flux_model) / rse
+    ax2.errorbar(phase, residuals_sigma,
+                        color='red', fmt='o', markersize=3, alpha=0.7)
+    ax2.axhline(0, color='black', linestyle='--', alpha=0.3)
+    ax2.axhline(2.5, color='black', linestyle='--', alpha=0.3)
+    ax2.axhline(-2.5, color='black', linestyle='--', alpha=0.3)
+    y_med = np.median(residuals_sigma)
+    y_mad = np.median(np.abs(residuals_sigma - y_med))
+    ax2.set_ylim(y_med - 8 * y_mad, y_med + 8 * y_mad)
+    ax2.set_ylabel(r"Residuals ($\sigma$)")
+    ax2.set_xlabel(r"Phase ($\phi$)")
+    ax1.set_ylabel("Normalized Flux")
+    plt.setp(ax1.get_xticklabels(), visible=False)
+    ax1.set_xlim(0, 1)
+    ax2.set_xlim(0, 1)
     plt.tight_layout()
-    plt.savefig(f"{fig_name}.png", bbox_inches='tight', dpi=150)
-    plt.savefig(f"{fig_name}.pdf", bbox_inches='tight', dpi=150)
+    plt.legend()
+    plt.savefig(f"{fig_name}.png", bbox_inches='tight', dpi=300)
+    plt.savefig(f"{fig_name}.pdf", bbox_inches='tight', dpi=300)
     plt.close(fig)
     logger.info(f"Saved: {fig_name}.png/.pdf")
 
@@ -313,7 +343,8 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     flux_data     = {}
     flux_err_data = {}
 
-    band_binfacts = {1: 2, 2: 2, 3: 3}
+    band_binfacts = {1: 2, 2: 3, 3: 3}
+    n_bands = len(band_order)
 
     fig = plt.figure(figsize=(10, 12))
     gs  = fig.add_gridspec(3, 1, height_ratios=[1, 1, 1], hspace=0.05)
@@ -337,12 +368,29 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
         orig_dat  = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
         bin_width = 1.0 / len(phase_bin)
+
+        oot_mask  = flux_bin > 0.85
+        ie_mask   = flux_bin < 0.5
+        ingr_mask = ~oot_mask & ~ie_mask
+        categories = [oot_mask, ingr_mask, ie_mask]
+        n_nonempty = sum(1 for m in categories if np.sum(m) > 0)
+        weights    = np.zeros(len(flux_bin))
+        for m in categories:
+            n = np.sum(m)
+            if n > 0:
+                weights[m] = 1.0 / (n_nonempty * n * n_bands)
+        logger.info(
+            f"Band {band_idx} weights: oot={np.sum(oot_mask)}, "
+            f"ingr/egr={np.sum(ingr_mask)}, in={np.sum(ie_mask)}, "
+            f"band_total={weights.sum():.6f} (1/{n_bands} of global)"
+        )
+
         with open(orig_dat, "w") as f:
             f.write(f"# Written by model.py for the {band_names[band_idx]}-band\n")
             f.write("# EB contamination removed\n")
-            f.write(f"# Binned data, bin width = {bin_width:.6f} phase units\n")
-            for ph, fl, fe in zip(phase_bin, flux_bin, flux_err_bin):
-                f.write(f"{ph:.8f} {bin_width:.8f} {fl:.6f} {fe:.6f} 1 1\n")
+            f.write(f"# Balanced weights: ingr/egr=in-eclipse=oot, bin width = {bin_width:.6f}\n")
+            for ph, fl, fe, w in zip(phase_bin, flux_bin, flux_err_bin, weights):
+                f.write(f"{ph:.8f} {bin_width:.8f} {fl:.6f} {fe:.6f} {w:.8f} 1\n")
         logger.info(f"Saved: {orig_dat}")
 
         phase_data[band_idx]    = phase_bin
@@ -359,7 +407,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         if band_idx < 3:
             plt.setp(ax.get_xticklabels(), visible=False)
     ax.set_xlabel(r"Phase ($\phi$)")
-    plt.savefig(f"{data_dir}/phased_lc.png", bbox_inches='tight', dpi=150)
+    plt.savefig(f"{data_dir}/phased_lc.png", bbox_inches='tight', dpi=300)
     plt.close(fig)
     logger.info(f"Saved: {data_dir}/phased_lc.png")
 
@@ -386,29 +434,6 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_simplex", results_simplex).lc_with_model(use_phase=True)
     plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_simplex", results_simplex)
 
-    results_levmarq = {}
-    reference_model_levmarq = None
-
-    for band_idx in band_order:
-        filename = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
-        levmarq_model_file, phase, flux_norm, flux_err_norm, phase_model, flux_model = run_levmarq_model(
-            logger, filename, band_idx, data_dir, gaia_id, rv_config, reference_model_levmarq
-        )
-        results_levmarq[band_idx] = {
-            'phase':       phase,
-            'flux':        flux_norm,
-            'flux_err':    flux_err_norm,
-            'phase_model': phase_model,
-            'flux_model':  flux_model,
-            't0_nearby':   0.0,
-        }
-        if band_idx == 2:
-            reference_model_levmarq = levmarq_model_file
-            logger.info("Using g-band geometry for subsequent levmarq fits")
-
-    lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_levmarq", results_levmarq).lc_with_model(use_phase=True)
-    plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_levmarq", results_levmarq)
-
     results = {}
     for band_idx in band_order:
         con_lev    = f"{data_dir}/{gaia_id}_model_simplex_model_{band_idx}"
@@ -420,7 +445,25 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     os.chdir(data_dir)
 
-    plot_labels = [r"$q$", r"$i$", r"$r_1/a$", r"$r_2/a$", r"$T_1$", r"$T_2$"]
+    param_label_map = {
+        "q":      r"$q$",
+        "iangle": r"$i\ [^\circ]$",
+        "r1":     r"$r_1/a$",
+        "r2":     r"$r_2/a$",
+        "t1":     r"$T_1\ [\mathrm{K}]$",
+        "t2":     r"$T_2\ [\mathrm{K}]$",
+        "t0":     r"$t_0$",
+    }
+    param_label_map_short = {
+        "q":      r"$q$",
+        "iangle": r"$i$",
+        "r1":     r"$r_1/a$",
+        "r2":     r"$r_2/a$",
+        "t1":     r"$T_1$",
+        "t2":     r"$T_2$",
+        "t0":     r"$t_0$",
+    }
+    plot_labels = [param_label_map_short.get(n, n) for n in results[band_order[0]]["names"]]
 
     for band_idx in band_order:
         new_config = f"{data_dir}/model_vary_q_{band_idx}"
@@ -496,7 +539,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     with Pool(processes=32) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_probability,
-            args=(names, data_dir, rv_config, gaia_id, band_order, i_prior, logger),
+            args=(names, data_dir, rv_config, gaia_id, band_order, i_prior, a_r_sun, period, logger),
             pool=pool
         )
         sampler.run_mcmc(p0, mcmc_steps, progress=True)
@@ -513,11 +556,12 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         ax.set_ylabel(names[i])
         ax.set_xlim(0, mcmc_steps)
         plt.tight_layout()
-        plt.savefig(f"{data_dir}/{mcmc_steps}_{names[i]}_walker_traj.png", dpi=150)
+        plt.savefig(f"{data_dir}/{mcmc_steps}_{names[i]}_walker_traj.png", dpi=300)
         plt.close(fig)
         logger.info(f"Saved: {data_dir}/{mcmc_steps}_{names[i]}_walker_traj.png")
 
-    discard = int(input("Enter number of burn-in steps to discard: "))
+    #discard = int(input("Enter number of burn-in steps to discard: "))
+    discard = 5000
 
     samples   = sampler.get_chain(discard=discard, thin=10, flat=True)
     param_med = np.median(samples, axis=0)
@@ -540,18 +584,38 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     samples_extended = np.hstack([m1_samples[:, None], m2_samples[:, None], samples])
     samples_extended = np.delete(samples_extended, 2 + q_col, axis=1)
 
-    corner_labels    = [
-        r'$M_{\rm WD}\ [M_\odot]$', r'$M_{\rm comp}\ [M_\odot]$',
-        r'$i\ [^\circ]$', r'$r_1/a$', r'$r_2/a$', r'$T_1\ [K]$', r'$T_2\ [K]$'
-    ]
+    corner_labels = (
+        [r'$M_{\rm WD}\ [M_\odot]$', r'$M_{\rm comp}\ [M_\odot]$']
+        + [param_label_map.get(n, n) for n in names if n != "q"]
+    )
     param_med_corner = np.median(samples_extended, axis=0)
     cornerfig = corner.corner(
         samples_extended, labels=corner_labels, truths=param_med_corner,
-        show_titles=True, title_fmt=".2f"
+        show_titles=True, title_fmt=".2f",
+        label_kwargs={"fontsize": 18}, title_kwargs={"fontsize": 18},
+        fig=plt.figure(figsize=(7, 7)),
     )
-    cornerfig.savefig(f"{data_dir}/model_corner_plot.png", dpi=150)
+    for ax in cornerfig.get_axes():
+        ax.tick_params(labelsize=18)
+    cornerfig.savefig(f"{data_dir}/model_corner_plot.png", dpi=300)
+    cornerfig.savefig(f"{data_dir}/model_corner_plot.pdf", dpi=300)
+    logger.info(f"Saved: {data_dir}/model_corner_plot.png/.pdf")
     plt.close(cornerfig)
-    logger.info(f"Saved: {data_dir}/model_corner_plot.png")
+
+    cornerfig_t = corner.corner(
+        samples_extended, labels=corner_labels, truths=param_med_corner,
+        show_titles=True, title_fmt=".2f", color='white',
+        hist_kwargs={'color': 'white'}, contour_kwargs={'colors': 'grey'},
+        label_kwargs={"fontsize": 18}, title_kwargs={"fontsize": 18},
+        fig=plt.figure(figsize=(7, 7)),
+    )
+    for ax in cornerfig_t.get_axes():
+        ax.tick_params(labelsize=18)
+    plotting._apply_transparent_style(cornerfig_t)
+    cornerfig_t.savefig(f"{data_dir}/model_corner_plot_transparent.png", dpi=600, transparent=True)
+    cornerfig_t.savefig(f"{data_dir}/model_corner_plot_transparent.pdf", dpi=600, transparent=True)
+    logger.info(f"Saved: {data_dir}/model_corner_plot_transparent.png/.pdf")
+    plt.close(cornerfig_t)
 
     percent = np.percentile(samples_extended, [16, 50, 84], axis=0)
     medians = percent[1]
@@ -565,37 +629,6 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         for label, med, lo, hi in zip(corner_labels, medians, lowers, uppers):
             of.write(f"{label:<30} {med:>12.4f} {lo:>12.4f} {hi:>12.4f}\n")
     logger.info(f"Saved: {txt_file}")
-
-    for band_idx in band_order:
-        orig_dat     = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
-        phase_bin    = phase_data[band_idx]
-        flux_bin     = flux_data[band_idx]
-        flux_err_bin = flux_err_data[band_idx]
-        bin_width    = 1.0 / len(phase_bin)
-
-        oot_mask  = flux_bin > 0.85
-        ie_mask   = flux_bin < 0.5
-        ingr_mask = ~oot_mask & ~ie_mask
-        categories = [oot_mask, ingr_mask, ie_mask]
-        n_nonempty = sum(1 for m in categories if np.sum(m) > 0)
-        weights    = np.zeros(len(flux_bin))
-        for m in categories:
-            n = np.sum(m)
-            if n > 0:
-                weights[m] = 1.0 / (n_nonempty * n)
-        logger.info(
-            f"Band {band_idx} weights: oot={np.sum(oot_mask)}, "
-            f"ingr/egr={np.sum(ingr_mask)}, in={np.sum(ie_mask)}, "
-            f"total={weights.sum():.6f}"
-        )
-
-        with open(orig_dat, "w") as f:
-            f.write(f"# Written by model.py for the {band_names[band_idx]}-band\n")
-            f.write("# EB contamination removed\n")
-            f.write(f"# Balanced weights: ingr/egr=in-eclipse=oot, bin width = {bin_width:.6f}\n")
-            for ph, fl, fe, w in zip(phase_bin, flux_bin, flux_err_bin, weights):
-                f.write(f"{ph:.8f} {bin_width:.8f} {fl:.6f} {fe:.6f} {w:.8f} 1\n")
-        logger.info(f"Rewritten with balanced weights: {orig_dat}")
 
     results_best = {}
     for band_idx in band_order:

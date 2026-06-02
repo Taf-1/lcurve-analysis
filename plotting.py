@@ -27,6 +27,26 @@ mpl.rcParams.update({
     "legend.frameon": False,
 })
 
+def _apply_transparent_style(fig: plt.Figure) -> None:
+    fig.patch.set_alpha(0)
+    for ax in fig.get_axes():
+        ax.patch.set_alpha(0)
+        ax.xaxis.label.set_color('white')
+        ax.yaxis.label.set_color('white')
+        ax.title.set_color('white')
+        ax.tick_params(axis='both', colors='white')
+        ax.xaxis.get_offset_text().set_color('white')
+        ax.yaxis.get_offset_text().set_color('white')
+        for spine in ax.spines.values():
+            spine.set_edgecolor('white')
+        for text in ax.texts:
+            text.set_color('white')
+        legend = ax.get_legend()
+        if legend:
+            for text in legend.get_texts():
+                text.set_color('white')
+
+
 class stats_plots:
     def __init__(self, logger: logging.Logger, corr_masked: np.ndarray, names: list[str], band_index: int,
                 q_vals: np.ndarray, i_vals: np.ndarray, delta_chi2: np.ndarray, q_best: float,
@@ -62,6 +82,10 @@ class stats_plots:
         fig1.savefig(f"{self.gaia_id}_correlation_{self.band_index}.png", dpi=300)
         fig1.savefig(f"{self.gaia_id}_correlation_{self.band_index}.pdf", dpi=300)
         self.logger.info(f"saved - {self.gaia_id}_correlation_{self.band_index}.png/.pdf")
+        _apply_transparent_style(fig1)
+        fig1.savefig(f"{self.gaia_id}_correlation_{self.band_index}_transparent.png", dpi=600, transparent=True)
+        fig1.savefig(f"{self.gaia_id}_correlation_{self.band_index}_transparent.pdf", dpi=600, transparent=True)
+        self.logger.info(f"saved - {self.gaia_id}_correlation_{self.band_index}_transparent.png/.pdf")
         plt.close(fig1)
 
     def chi2_2d_map(self) -> None:
@@ -78,6 +102,10 @@ class stats_plots:
         fig2.savefig(f"{self.gaia_id}_chi2_2d_map.png", dpi=300)
         fig2.savefig(f"{self.gaia_id}_chi2_2d_map.pdf", dpi=300)
         self.logger.info(f"saved - {self.gaia_id}_chi2_2d_map.png/.pdf")
+        _apply_transparent_style(fig2)
+        fig2.savefig(f"{self.gaia_id}_chi2_2d_map_transparent.png", dpi=600, transparent=True)
+        fig2.savefig(f"{self.gaia_id}_chi2_2d_map_transparent.pdf", dpi=600, transparent=True)
+        self.logger.info(f"saved - {self.gaia_id}_chi2_2d_map_transparent.png/.pdf")
         plt.close(fig2)
     
     def marginalised_profile(self) -> None:
@@ -96,9 +124,13 @@ class stats_plots:
         ax2.set_ylabel(r"$\Delta \chi^2$ (marginalised over $i$)")
         ax2.set_ylim(0, 30)
         plt.tight_layout()
-        fig3.savefig(f"{self.gaia_id}_1d_marginalised_profile.png")
-        fig3.savefig(f"{self.gaia_id}_1d_marginalised_profile.pdf")
+        fig3.savefig(f"{self.gaia_id}_1d_marginalised_profile.png", dpi=300)
+        fig3.savefig(f"{self.gaia_id}_1d_marginalised_profile.pdf", dpi=300)
         self.logger.info(f"saved - {self.gaia_id}_1d_marginalised_profile.png/.pdf")
+        _apply_transparent_style(fig3)
+        fig3.savefig(f"{self.gaia_id}_1d_marginalised_profile_transparent.png", dpi=600, transparent=True)
+        fig3.savefig(f"{self.gaia_id}_1d_marginalised_profile_transparent.pdf", dpi=600, transparent=True)
+        self.logger.info(f"saved - {self.gaia_id}_1d_marginalised_profile_transparent.png/.pdf")
         plt.close(fig3)
 
 class lcurve_model_plot:
@@ -112,6 +144,8 @@ class lcurve_model_plot:
         gs = fig.add_gridspec(6, 1, height_ratios=[3, 1, 3, 1, 3, 1], hspace=0.05)
         plot_order = [1, 2, 3]
         band_colours = {1: 'blue', 2: 'green', 3: 'red'}
+        model_lines = []
+        hlines = []
         for plot_idx, band_idx in enumerate(plot_order):
             ax_main = fig.add_subplot(gs[plot_idx*2, 0])
             ax_res  = fig.add_subplot(gs[plot_idx*2 + 1, 0], sharex=ax_main)
@@ -127,13 +161,14 @@ class lcurve_model_plot:
                 x_model = res['time_model']
                 xlim = (0, max(x_data))
                 xlabel= f"BMJD (TDB) - {res['t0_nearby']:.2f}"
-            ax_main.plot(x_model, res['flux_model'],
+            model_line, = ax_main.plot(x_model, res['flux_model'],
                         color='black', lw=2, zorder=5)
+            model_lines.append(model_line)
             ax_main.errorbar(x_data, res['flux'],
                             yerr=res['flux_err'],
                             color=colour, fmt='o', markersize=3, alpha=0.7,
                             zorder=3)
-            ax_main.set_ylabel("Normalized Flux")
+            ax_main.set_ylabel("Normalized\nFlux")
             plt.setp(ax_main.get_xticklabels(), visible=False)
             ax_main.set_ylim(-0.1, 1.3)
             ax_main.set_xlim(*xlim)
@@ -143,17 +178,26 @@ class lcurve_model_plot:
             residuals_sigma = (res['flux'] - res['flux_model']) / rse
             ax_res.errorbar(x_data, residuals_sigma,
                         color=colour, fmt='o', markersize=3, alpha=0.7)
-            ax_res.axhline(0, color='black', linestyle='--', alpha=0.3)
-            ax_res.axhline(2.5, color='black', linestyle='--', alpha=0.3)
-            ax_res.axhline(-2.5, color='black', linestyle='--', alpha=0.3)
+            hlines += [
+                ax_res.axhline(0,    color='black', linestyle='--', alpha=0.3),
+                ax_res.axhline(2.5,  color='black', linestyle='--', alpha=0.3),
+                ax_res.axhline(-2.5, color='black', linestyle='--', alpha=0.3),
+            ]
             y_med = np.median(residuals_sigma)
             y_mad = np.median(np.abs(residuals_sigma - y_med))
             ax_res.set_ylim(y_med - 8 * y_mad, y_med + 8 * y_mad)
             ax_res.set_ylabel(r"Residuals ($\sigma$)")
             if plot_idx < 2:
                 plt.setp(ax_res.get_xticklabels(), visible=False)
-            ax_res.set_xlabel(xlabel, fontsize=16)
-        plt.savefig(f"{self.fig_name}.png", bbox_inches='tight', dpi=150)
-        plt.savefig(f"{self.fig_name}.pdf", bbox_inches='tight', dpi=150)
+            else:
+                ax_res.set_xlabel(xlabel)
+        plt.savefig(f"{self.fig_name}.png", bbox_inches='tight', dpi=300)
+        plt.savefig(f"{self.fig_name}.pdf", bbox_inches='tight', dpi=300)
         self.logger.info(f"Saved: {self.fig_name}.png/.pdf")
+        for line in model_lines + hlines:
+            line.set_color('white')
+        _apply_transparent_style(fig)
+        fig.savefig(f"{self.fig_name}_transparent.png", bbox_inches='tight', dpi=600, transparent=True)
+        fig.savefig(f"{self.fig_name}_transparent.pdf", bbox_inches='tight', dpi=600, transparent=True)
+        self.logger.info(f"Saved: {self.fig_name}_transparent.png/.pdf")
         plt.close(fig)

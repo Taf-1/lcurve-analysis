@@ -3,6 +3,7 @@ import numpy as np
 import os
 import sys
 import uuid
+from tqdm import tqdm
 from lcurve_commands import lcurve
 from lcurve_rv_calc import xshooter_params
 from lcurve_model_file import adjust_parameters
@@ -93,7 +94,7 @@ class q_i_degeneracy:
         q_vals = np.linspace(0.12, 0.2, 100)
         i_vals = np.linspace(80, 89.9, 80)
         chi2 = np.zeros((len(q_vals), len(i_vals)))
-        for iq_idx, q in enumerate(q_vals):
+        for iq_idx, q in tqdm(enumerate(q_vals), total=len(q_vals), desc="chi2 q-i grid"):
             for ii_idx, inc in enumerate(i_vals):
                 id = uuid.uuid4().hex
                 orig_data = f"{self.gaia_id}_phase_data_file_{self.band_index}"
@@ -121,8 +122,11 @@ class q_i_degeneracy:
         rv_params = xshooter_params(logger=self.logger, rv_config=self.rv_config, phase=[])
         rv_q_mean, rv_q_sigma, _, _ = rv_params.q_n_velocityscale()
         delta_q_raw = chi2_marginal_q - chi2_marginal_q.min()
-        p0 = [1000, q_vals[np.argmin(delta_q_raw)], 0]
-        popt, _ = curve_fit(parabola, q_vals, delta_q_raw, p0=p0)
+        x0_guess    = q_vals[np.argmin(delta_q_raw)]
+        a_guess     = delta_q_raw.max() / max((q_vals[-1] - q_vals[0]) / 2, 1e-6) ** 2
+        p0          = [a_guess, x0_guess, 0]
+        bounds      = ([0, q_vals[0], -np.inf], [np.inf, q_vals[-1], np.inf])
+        popt, _ = curve_fit(parabola, q_vals, delta_q_raw, p0=p0, bounds=bounds, maxfev=10000)
         delta_q = parabola(q_vals, *popt)
         delta_q -= delta_q.min()
         return q_vals, i_vals, delta_q, delta_chi2, rv_q_mean, rv_q_sigma, p_best, i_best

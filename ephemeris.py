@@ -7,6 +7,7 @@ import logging
 import os
 import numpy as np
 import emcee
+from emcee import utils
 import corner
 import uuid
 import matplotlib.pyplot as plt
@@ -33,9 +34,9 @@ def load_model_params(logger: logging.Logger, config: str, tar: str, path: str) 
             if len(parts) >= 6 and parts[1] == "=":
                 all_names.append(parts[0])
 
-    names   = all_names + ["period", "t0", "period", "t0"]
-    values  = ["0"] * len(all_names) + ["1", "1", "0.001", "0.001"]
-    indices = [5] * len(all_names) + [5, 5, 4, 4]
+    names   = all_names + ["period", "t0", "period", "t0", "period", "t0", "t0"]
+    values  = ["0"] * len(all_names) + ["1", "1", "0.0001", "0.0001", "0.0001", "0.0001", "0"]
+    indices = [5] * len(all_names) + [5, 5, 4, 4, 3, 3, 2]
 
     return adjust_parameters(
         logger, config, new_config, names, values, indices, set(names)
@@ -152,6 +153,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     ).write_data_file()
 
     new_model = load_model_params(logger, config, tar_name, pathname)
+    logger.info(f"Initialised t0 = 0 in t0_mid frame (t0_mid={t0_mid:.10f})")
 
     ngts_prelim = f"{pathname}/{tar_name}_ngts_model_file"
     lcurve(logger, new_model, output, ngts_prelim).simplex()
@@ -166,11 +168,11 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     mcmc_steps    = 20000
     ndim          = len(p_best)
-    nwalkers      = 4 * 4 * ndim
+    nwalkers      = 4 * ndim
     initial_spread = 0.01 * steps
-    p0            = p_best + initial_spread * np.random.randn(nwalkers, ndim)
+    p0             = utils.sample_ball(p_best, initial_spread, size=nwalkers)
 
-    with Pool(processes=32) as pool:
+    with Pool(processes=nwalkers) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_probability,
             args=(names, time - t0_nearby, flux, flux_err, output, base_lines, logger),
@@ -193,7 +195,8 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         plt.close(fig)
         logger.info(f"Saved: {pathname}/fix_walker_{names[i]}.png")
 
-    discard = int(input("\nEnter number of burn-in steps to discard: "))
+    """discard = int(input("\nEnter number of burn-in steps to discard: "))"""
+    discard = 5000
 
     samples = sampler.get_chain(discard=discard, thin=15, flat=True)
     logger.info(f"Final samples: {samples.shape[0]} (discard={discard}, thin=15)")
@@ -230,9 +233,9 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         fo.write("-" * 68 + "\n")
         for label, med, lo, hi in zip(names, medians, lowers, uppers):
             if label == "t0":
-                fo.write(f"{label:<30} {med + t0_mid:>12.4f} {lo:>12.4f} {hi:>12.4f}\n")
+                fo.write(f"{label:<30} {med + t0_mid:>12.8f} {lo:>12.8f} {hi:>12.8f}\n")
             else:
-                fo.write(f"{label:<30} {med:>12.4f} {lo:>12.4f} {hi:>12.4f}\n")
+                fo.write(f"{label:<30} {med:>12.8f} {lo:>12.8f} {hi:>12.8f}\n")
     logger.info(f"Saved: {txt_file}")
 
     best_model = f"{pathname}/best_fit_ephemeris_model"
