@@ -64,15 +64,14 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
             parts = line.split()
             if len(parts) >= 6 and parts[1] == "=":
                 name = parts[0]
-                if (name.startswith("ldc") or name.startswith("gravity_")) and name != "gravity_dark2":
+                if name.startswith("ldc") or name.startswith("gravity_"):
                     ldc_gravity_fixes.append((name, "0", 5))
 
     changes = [
         ("period", "1.0", 2), ("period", "0", 5),
         ("t0", "0.505", 2), ("t0", "0.005", 3), ("t0", "1", 5),
         ("q", "0", 5),
-        ("absorb",        "1", 5),
-        ("gravity_dark2", "1", 5),
+        ("absorb", "0", 5),
         *ldc_gravity_fixes,
         ("tperiod", "1", 2),
         ("iangle", geom, 5),
@@ -80,16 +79,17 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
         ("r2",     geom, 5),
         ("t1",     geom, 5),
         ("t2",     geom, 5),
+        ("iscale", "0" if not fix_geometry else "1", 2),
     ]
 
     if not fix_geometry:
-        changes += [
+        """changes += [
             ("iangle", "0.1",   3), ("iangle", "0.05",  4),
             ("r1",     "0.0001", 3), ("r1",     "0.0005", 4),
             ("r2",     "0.001", 3), ("r2",     "0.001",  4),
             ("t1",     "10",    3), ("t1",     "5",      4),
             ("t2",     "50",    3), ("t2",     "25",     4),
-        ]
+        ]"""
         if rv_config is not None:
             _, _, vs_value, _ = xshooter_params(logger, rv_config, []).q_n_velocityscale()
             changes += [("velocity_scale", f"{vs_value:.15e}", 2), ("velocity_scale", "0", 5)]
@@ -98,11 +98,6 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
     else:
         changes += [("velocity_scale", "0", 5)]
 
-    changes += [
-        ("absorb",        "0.005", 3), ("absorb",        "0.001",  4),
-        ("gravity_dark2", "0.002", 3), ("gravity_dark2", "0.005", 4),
-    ]
-
     names   = [c[0] for c in changes]
     values  = [c[1] for c in changes]
     indices = [c[2] for c in changes]
@@ -110,7 +105,7 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
 
 def adjusted_config(logger, base: str, config: str, path: str, band_idx: int, method: str) -> str:
     new_config = f"{path}/{method}_adjusted_config_{band_idx}"
-    prefix = "ldc1_"
+    prefix = ("ldc", "gravity", "beam", "absorb")
     values = {}
 
     with open(base, "r") as f:
@@ -176,7 +171,7 @@ def run_levmarq_model(logger, filename: str, band_index: int, pathname: str, tar
     phase_model, flux_model, _      = np.loadtxt(model_dat, usecols=(0, 2, 3), unpack=True)
     return ultracam_prelim, phase, flux_norm, flux_err_norm, phase_model, flux_model
 
-def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, i_prior: tuple[float, float] | None, a_r_sun: float, period: float, logger: logging.Logger) -> float:
+def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, a_r_sun: float, period: float, logger: logging.Logger) -> float:
     if params is None or not np.all(np.isfinite(params)):
         return -np.inf
 
@@ -196,15 +191,11 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None, i_pri
         k2_model  = 2 * np.pi * a_m * np.sin(i_rad) / (P_s * (1 + p["q"])) / 1e3
         lp += -0.5 * ((k2_model - k2_obs) / k2_err) ** 2
 
-    if i_prior is not None:
-        i_mean, i_sigma = i_prior
-        lp += -0.5 * ((p["iangle"] - i_mean) / i_sigma) ** 2
-
     if not (75    < p["iangle"] < 90):    return -np.inf
     if not (0.009 < p["r1"]     < 0.03):  return -np.inf
-    if not (0.09   < p["r2"]     < 0.3):  return -np.inf
-    if not (7000  < p["t1"]     < 15000): return -np.inf
-    if not (1500  < p["t2"]     < 4000):  return -np.inf
+    if not (0.09  < p["r2"]     < 0.3):   return -np.inf
+    if not (9500  < p["t1"]     < 11600): return -np.inf
+    if not (2200  < p["t2"]     < 3000):  return -np.inf
 
     return lp
 
@@ -217,7 +208,7 @@ def log_likelihood(params: np.ndarray, names: list[str], data_dir: str, rv_confi
     for band_idx in band_order:
         base      = f"{data_dir}/{gaia_id}_model_simplex_model_{band_idx}"
         orig_data = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
-        _, flux, flux_errors = np.loadtxt(orig_data, usecols=(0, 2, 3), unpack=True)
+        _, flux, flux_errors, weights = np.loadtxt(orig_data, usecols=(0, 2, 3, 4), unpack=True)
 
         walker_id = uuid.uuid4().hex[:8]
         mcmc_file = f"/tmp/w{walker_id}_mcmc_model"
@@ -260,15 +251,15 @@ def log_likelihood(params: np.ndarray, names: list[str], data_dir: str, rv_confi
         if mcmc_flux.shape != flux.shape or not np.all(np.isfinite(mcmc_flux)):
             return -np.inf
 
-        chi2 = np.sum(((flux - mcmc_flux) / flux_errors) ** 2)
+        chi2 = np.sum(weights * ((flux - mcmc_flux) / flux_errors) ** 2)
         if not np.isfinite(chi2):
             return -np.inf
         total_ll += -0.5 * chi2
 
     return total_ll
 
-def log_probability(params: np.ndarray, names: list[str], data_dir: str, rv_config: str | None, gaia_id: str, band_order: list[int], i_prior: tuple[float, float] | None, a_r_sun: float, period: float, logger: logging.Logger) -> float:
-    lp = log_prior(params, names, rv_config, i_prior, a_r_sun, period, logger)
+def log_probability(params: np.ndarray, names: list[str], data_dir: str, rv_config: str | None, gaia_id: str, band_order: list[int], a_r_sun: float, period: float, logger: logging.Logger) -> float:
+    lp = log_prior(params, names, rv_config, a_r_sun, period, logger)
     if not np.isfinite(lp):
         return -np.inf
     return lp + log_likelihood(params, names, data_dir, rv_config, gaia_id, band_order, logger)
@@ -434,6 +425,30 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_simplex", results_simplex).lc_with_model(use_phase=True)
     plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_simplex", results_simplex)
 
+    """results_levmarq       = {}
+    reference_model_levmarq = None
+
+    for band_idx in band_order:
+        filename = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
+        levmarq_model_file, phase, flux_norm, flux_err_norm, phase_model, flux_model = run_levmarq_model(
+            logger, filename, band_idx, data_dir, gaia_id, rv_config, reference_model_levmarq
+        )
+        results_levmarq[band_idx] = {
+            'phase':       phase,
+            'flux':        flux_norm,
+            'flux_err':    flux_err_norm,
+            'phase_model': phase_model,
+            'flux_model':  flux_model,
+            't0_nearby':   0.0,
+        }
+        if band_idx == 2:
+            reference_model_levmarq = levmarq_model_file
+            logger.info("Using g-band geometry for subsequent levmarq fits")
+
+    lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_levmarq", results_levmarq).lc_with_model(use_phase=True)
+    plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_levmarq", results_levmarq)
+    """
+    iglg
     results = {}
     for band_idx in band_order:
         con_lev    = f"{data_dir}/{gaia_id}_model_simplex_model_{band_idx}"
@@ -528,7 +543,6 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     names   = results[band_order[0]]["names"]
     p_best  = results[2]["p_best"]
-
     mcmc_steps  = 20000
     steps_mcmc  = 0.01 * np.abs(p_best)
     steps_mcmc  = np.where(steps_mcmc < 1e-8, 1e-8, steps_mcmc)
@@ -539,7 +553,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     with Pool(processes=32) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_probability,
-            args=(names, data_dir, rv_config, gaia_id, band_order, i_prior, a_r_sun, period, logger),
+            args=(names, data_dir, rv_config, gaia_id, band_order, a_r_sun, period, logger),
             pool=pool
         )
         sampler.run_mcmc(p0, mcmc_steps, progress=True)
@@ -572,12 +586,17 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     for name, med in zip(names, param_med):
         logger.info(f"{name} = {med:.6f}")
 
-    q_samples  = samples[:, names.index("q")]
-    a_m        = (a_r_sun * u.R_sun).to(u.m)
-    P_s        = (period * u.day).to(u.s)
-    m_total_kg = ((4 * np.pi**2 * a_m**3) / (const.G * P_s**2)).value
-    m_total_msun = m_total_kg / const.M_sun.value
-    m1_samples = m_total_msun / (1 + q_samples)
+    q0, q_err, vs0, vs_err = xshooter_params(logger, rv_config, []).q_n_velocityscale()
+    i_samples  = samples[:, names.index("iangle")]
+    q_samples  = samples[:, names.index("q")]                        
+    vs_ms      = vs0 * 1e3
+    P_s        = (period * u.day).to(u.s).value
+    sin_i      = np.sin(np.radians(i_samples))
+
+    a_m        = vs_ms * P_s / (2*np.pi * sin_i)    
+    m_total_kg = (4*np.pi**2 * a_m**3) / (const.G.value * P_s**2)
+    m_total    = m_total_kg / const.M_sun.value
+    m1_samples = m_total / (1 + q_samples)
     m2_samples = q_samples * m1_samples
 
     q_col = names.index("q")
@@ -592,8 +611,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     cornerfig = corner.corner(
         samples_extended, labels=corner_labels, truths=param_med_corner,
         show_titles=True, title_fmt=".2f",
-        label_kwargs={"fontsize": 18}, title_kwargs={"fontsize": 18},
-        fig=plt.figure(figsize=(7, 7)),
+        label_kwargs={"fontsize": 13}, title_kwargs={"fontsize": 13},
     )
     for ax in cornerfig.get_axes():
         ax.tick_params(labelsize=18)

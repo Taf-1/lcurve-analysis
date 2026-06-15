@@ -233,9 +233,9 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         fo.write("-" * 68 + "\n")
         for label, med, lo, hi in zip(names, medians, lowers, uppers):
             if label == "t0":
-                fo.write(f"{label:<30} {med + t0_mid:>12.8f} {lo:>12.8f} {hi:>12.8f}\n")
+                fo.write(f"{label:<30} {med + t0_mid:>12.10f} {lo:>12.10f} {hi:>12.10f}\n")
             else:
-                fo.write(f"{label:<30} {med:>12.8f} {lo:>12.8f} {hi:>12.8f}\n")
+                fo.write(f"{label:<30} {med:>12.10f} {lo:>12.10f} {hi:>12.10f}\n")
     logger.info(f"Saved: {txt_file}")
 
     best_model = f"{pathname}/best_fit_ephemeris_model"

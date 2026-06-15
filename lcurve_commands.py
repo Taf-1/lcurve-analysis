@@ -1,7 +1,7 @@
 import subprocess
 import logging
 
-NMAX = "200000"
+NMAX = "2000"
 DELTA = "0.01"
 LMAX = "2e10"
 SCALE = "yes"
@@ -10,8 +10,6 @@ SEED = "57565"
 NFILE = "1"
 DEVICE = "/null"
 FTOL = "1e-012"
-NMAX_simplex = "100000"
-
 
 class lcurve:
     def __init__(self, logger: logging.Logger, model: str, data: str, output: str) -> None:

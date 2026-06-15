@@ -19,10 +19,10 @@ class create_data_file:
                 self.logger.info(f"Band index {self.band_index} exceeds available extensions")
                 raise ValueError(f"Band index {self.band_index} exceeds available extensions")
             data = f[self.band_index].data
-        time = data['BMJD(TDB)']
-        exp_time = data['Exp_time']
-        flux = data['Flux']
-        flux_err = data['Flux_err']
+        time = np.array(data['BMJD(TDB)'], dtype=float)
+        exp_time = np.array(data['Exp_time'], dtype=float)
+        flux = np.array(data['Flux'], dtype=float)
+        flux_err = np.array(data['Flux_err'], dtype=float)
         oot_mask = (flux > 0.85 * np.median(flux))
         norm = np.mean(flux[oot_mask])
         flux /= norm
@@ -86,21 +86,17 @@ class save_data_file:
 
     def write_data_file(self) -> str:
         self.logger.info(f"Writing the data file - {self.output}")
-        n_bands = 3
-        oot_mask  = self.flux_norm > 0.85
-        ie_mask   = self.flux_norm < 0.5
-        ingr_mask = ~oot_mask & ~ie_mask
-        categories = [oot_mask, ingr_mask, ie_mask]
-        n_nonempty = sum(1 for m in categories if np.sum(m) > 0)
-        weights    = np.zeros(len(self.flux_norm))
-        for m in categories:
-            n = np.sum(m)
-            if n > 0:
-                weights[m] = 1.0 / (n_nonempty * n * n_bands)
         with open(self.output, "w") as f:
             f.write(f"# Band {self.band_index} data\n")
             f.write(f"# Times relative to t0_nearby = {self.t0_nearby:.10f}\n") 
-            for ph, et, fl, fe, w in zip(self.time, self.exp_time, self.flux_norm, self.flux_err_norm, weights):
-                f.write(f"{ph-self.t0_nearby:.8f} {et:.8f} {fl:.6f} {fe:.6f} {w:.8f} 1\n")
+            for i in range(len(self.time)):
+                rel_time = self.time[i] - self.t0_nearby
+                f.write(
+                    f"{rel_time:.10f} "
+                    f"{self.exp_time[i]:.6e} "
+                    f"{self.flux_norm[i]:.6f} "
+                    f"{self.flux_err_norm[i]:.6f} "
+                    f"1 1\n"
+                )
         self.logger.info(f"Saved!")
         return self.output

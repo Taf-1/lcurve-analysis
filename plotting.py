@@ -168,7 +168,7 @@ class lcurve_model_plot:
                             yerr=res['flux_err'],
                             color=colour, fmt='o', markersize=3, alpha=0.7,
                             zorder=3)
-            ax_main.set_ylabel("Normalized\nFlux")
+            ax_main.set_ylabel("Normalized Flux")
             plt.setp(ax_main.get_xticklabels(), visible=False)
             ax_main.set_ylim(-0.1, 1.3)
             ax_main.set_xlim(*xlim)
@@ -185,7 +185,8 @@ class lcurve_model_plot:
             ]
             y_med = np.median(residuals_sigma)
             y_mad = np.median(np.abs(residuals_sigma - y_med))
-            ax_res.set_ylim(y_med - 8 * y_mad, y_med + 8 * y_mad)
+            #ax_res.set_ylim(y_med - 8 * y_mad, y_med + 8 * y_mad)
+            ax_res.set_ylim(-5, 5)
             ax_res.set_ylabel(r"Residuals ($\sigma$)")
             if plot_idx < 2:
                 plt.setp(ax_res.get_xticklabels(), visible=False)

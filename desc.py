@@ -7,6 +7,7 @@ from lcurve_commands import lcurve
 from lcurve_data_files import create_data_file, save_data_file
 from lcurve_model_file import claret_tables_interp, effective_wavelength, adjust_parameters
 from plotting import lcurve_model_plot
+from astropy.time import Time
 
 def arg_parse() -> ap.Namespace:
     p = ap.ArgumentParser()
@@ -21,10 +22,21 @@ def arg_parse() -> ap.Namespace:
     p.add_argument("teff2",       help="Effective temperature of the companion")
     p.add_argument("logg2",       help="log g of the companion")
     p.add_argument("example_model", help="Base lcurve model file used as initial template")
+    p.add_argument("wd_model_path", help="SPEEDYFIT KOESTER wd model txt file")
+    p.add_argument("comp_model_path", help="SPEEDYFIT NextGEN/Phoenix comp model txt file")
     return p.parse_args()
 
+def read_param(config, name):
+    with open(config) as f:
+        for line in f:
+            p = line.split()
+            if len(p) >= 3 and p[0] == name and p[1] == "=":
+                return p[2]
+    raise KeyError(name)
+
 def change_params(logger: logging.Logger, config: str, path: str, period: float, t0: float, band_index: int,
-                  wd_ldc: list[float], comp_ldc: list[float], gdc: list[float], wavelength: float, fix_geometry: bool = False) -> str:
+                  wd_ldc: list[float], comp_ldc: list[float], gdc: list[float], wavelength: float, 
+                  bf1: float, bf2: float, fix_geometry: bool = False) -> str:
     new_config = f"{path}/ultracam_model_file_{band_index}"
     a1,  a2,  a3,  a4  = wd_ldc
     a1c, a2c, a3c, a4c = comp_ldc
@@ -37,8 +49,6 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         # Always-fixed parameters
         ("q", "0", 5),
         ("velocity_scale", "0", 5),
-        ("beam_factor1", "0", 5),
-        ("beam_factor2", "0", 5),
         # Geometry-dependent fit flags
         ("iangle", geom, 5),
         ("r1", geom, 5),
@@ -59,17 +69,24 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         # Gravity darkening: set value and lock
         ("gravity_dark1", f"{y1}", 2), ("gravity_dark1", "1", 5),
         ("gravity_dark2", f"{y2}", 2), ("gravity_dark2", "1", 5),
-        # 3-part lines: wavelength and tperiod
+        # 3-part lines: wavelength and beam factors 
         ("wavelength", f"{wavelength}", 2),
-        ("tperiod", f"{period:.10f}", 2),
+        ("beam_factor1", f"{bf1}", 2), ("beam_factor2", "0", 5),
+        ("beam_factor2", f"{bf2}", 2), ("beam_factor2", "0", 5), 
+        ("iscale", "0" if not fix_geometry else "1", 2)
     ]
 
-    if fix_geometry:
-        changes += [("period", "0", 5), ("t0", "0", 5)]
+    if fix_geometry: 
+        cur_period = read_param(config, "period")  
+        changes += [
+            ("period",  cur_period, 2), ("period",  "0", 5),
+            ("tperiod", cur_period, 2), ("t0", "1", 5),         
+        ]
     else:
         changes += [
-            ("period", f"{period}", 2), ("period", "0.0001", 3), ("period", "1", 5),
-            ("t0", f"{t0:.10f}", 2), ("t0", "0.001", 3), ("t0", "1", 5),
+            ("period",  f"{period}", 2), ("period", "1", 5),
+            ("tperiod", f"{period}", 2),                  
+            ("t0", f"0.0", 2), ("t0", "1", 5),
         ]
 
     names   = [c[0] for c in changes]
@@ -82,7 +99,7 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
 
 def run_model(logger: logging.Logger, filename: str, band_index: int, t0: float, pathname: str, tar_name: str, period: float,
               wd_temp: float, wd_logg: float, wd_type: str, comp_temp: float, comp_logg: float, filt: str,
-              reference_model: str | None = None, example_model: str | None = None) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+              reference_model: str | None = None, example_model: str | None = None, wd_model_path: str | None = None, comp_model_path: str | None = None) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
 
     time, exp_time, flux_norm, flux_err_norm, t0_nearby = create_data_file(
         logger, pathname, filename, band_index, t0, period
@@ -99,7 +116,13 @@ def run_model(logger: logging.Logger, filename: str, band_index: int, t0: float,
     comp_ldc = claret.comp_limb_darkening()
     gdc      = claret.gravity_darkening()
 
-    wavelength = effective_wavelength(logger, band_index).pivot_wave()
+    ew = effective_wavelength(logger, band_index)
+    wavelength = ew.pivot_wave()
+
+    wd_wave, wd_flux     = effective_wavelength.load_speedyfit_spectrum(wd_model_path)
+    comp_wave, comp_flux = effective_wavelength.blackbody_spectrum(comp_temp)
+    bf1 = ew.beam_factor(wd_wave, wd_flux)
+    bf2 = ew.beam_factor(comp_wave, comp_flux)
 
     fix_geometry = reference_model is not None
     base_model = reference_model if fix_geometry else example_model
@@ -111,8 +134,8 @@ def run_model(logger: logging.Logger, filename: str, band_index: int, t0: float,
         logger.info(f"Band {band_index}: fitting geometry + temperatures")
 
     model_config = change_params(
-        logger, base_model, pathname, period, 0.0, band_index,
-        wd_ldc, comp_ldc, gdc, wavelength, fix_geometry
+        logger, base_model, pathname, period, t0_nearby, band_index,
+        wd_ldc, comp_ldc, gdc, wavelength, bf1, bf2, fix_geometry
     )
 
     ultracam_prelim = f"{pathname}/{tar_name}_ultracam_model_file_{band_index}"
@@ -136,6 +159,8 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     comp_temp     = float(cfg['teff2'])
     comp_logg     = float(cfg['logg2'])
     example_model = cfg['example_model']
+    wd_model_path = cfg['wd_model_path']
+    comp_model_path = cfg['comp_model_path']
     pathname      = f"{data_root}/{tar_name}"
 
     if not os.path.exists(pathname):
@@ -150,7 +175,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         model_file, time, flux_norm, flux_err_norm, time_model, flux_model, t0_nearby = run_model(
             logger, filename, band_idx, t0, pathname, tar_name, period,
             wd_temp, wd_logg, wd_type, comp_temp, comp_logg,
-            band_names[band_idx], reference_model, example_model
+            band_names[band_idx], reference_model, example_model, wd_model_path, comp_model_path
         )
         results[band_idx] = {
             'time':       time,
@@ -185,4 +210,6 @@ if __name__ == "__main__":
         'teff2':        args.teff2,
         'logg2':        args.logg2,
         'example_model': args.example_model,
+        'wd_model_path': args.wd_model_path,
+        'comp_model_path': args.comp_model_path,
     }, logger)

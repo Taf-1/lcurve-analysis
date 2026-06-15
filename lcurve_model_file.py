@@ -40,6 +40,7 @@ import numpy as np
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from astroquery.vizier import Vizier
 from astropy.table import Table
+from scipy.optimize import minimize
 
 class claret_tables_interp:
     def __init__(self, logger: logging.Logger, wd_temp: float, wd_logg: float, wdtype: str, comp_temp: float, comp_logg: float, filt: str) -> None:
@@ -80,6 +81,19 @@ class claret_tables_interp:
             logger.info(f"Interpolated to get the {coef} coefficients via the Claret 2-term law")
             return y1, y2
 
+    @staticmethod
+    def refit_4term(I_target: np.ndarray, mu: np.ndarray) -> tuple[float, float, float, float]:
+        # I(mu) = 1 - B @ a, linear in a
+        B  = np.column_stack([1.0 - mu**(k/2) for k in (1, 2, 3, 4)])
+        y  = 1.0 - I_target
+        a0, *_ = np.linalg.lstsq(B, y, rcond=None)            # unconstrained start
+
+        # min ||B a - y||^2  s.t.  I(mu) = 1 - B a >= 0  on the grid
+        obj  = lambda a: float((B @ a - y) @ (B @ a - y))
+        cons = {"type": "ineq", "fun": lambda a: 1.0 - B @ a}
+        res  = minimize(obj, a0, constraints=cons, method="SLSQP")
+        return tuple(float(x) for x in res.x)
+
     def wd_limb_darkening(self) -> tuple[float, float, float, float]:
         data = self.query_vizier(self.logger, "J/A+A/634/A93/tablea4")
         mask = (data["Filter"] == self.filt) & (data["Mod"] == self.wdtype)
@@ -89,9 +103,18 @@ class claret_tables_interp:
 
     def comp_limb_darkening(self) -> tuple[float, float, float, float]:
         data = self.query_vizier(self.logger, "J/A+A/546/A14/limb6")
-        mask = (data["Filt"] == self.filt) & (data["Mod"] == 'qs')
+        mask = (data["Filt"] == self.filt) & (data["Mod"] == 's')
         filt_data = data[mask]
         a1, a2, a3, a4 = self.itp(self.logger, filt_data, self.comp_logg, self.comp_temp, 'ldc')
+
+        mu = np.linspace(0.0, 1.0, 101)
+        a  = (a1, a2, a3, a4)
+        I  = 1.0 - sum(ak * (1.0 - mu**(k/2)) for k, ak in enumerate(a, start=1))
+        if I.min() < 0.0:
+            self.logger.info(f"Companion I(mu) dips to {I.min():.4f}; clamping at 0 and refitting")
+            I = np.clip(I, 0.0, None)
+            a1, a2, a3, a4 = self.refit_4term(I, mu)
+
         return a1, a2, a3, a4
 
     def gravity_darkening(self) -> tuple[float, float]:
@@ -99,12 +122,28 @@ class claret_tables_interp:
         mask = (data["Filter"] == self.filt) & (data["Mod"] == self.wdtype)
         filt_data = data[mask]
         y1, y2 = self.itp(self.logger, filt_data, self.wd_logg, self.wd_temp, 'gdc')
+        """y2 = 0.08"""
         return y1, y2
 
 class effective_wavelength:
     def __init__(self, logger: logging.Logger, band_index: int) -> None:
         self.logger = logger
         self.band_index = band_index
+    
+    @staticmethod
+    def load_speedyfit_spectrum(path):
+        wave, flux = np.loadtxt(path, skiprows=1, usecols=(0, 1), unpack=True)
+        return wave, flux
+
+    @staticmethod
+    def blackbody_spectrum(temp: float, wmin: float = 2500.0, wmax: float = 12000.0, n: int = 8000) -> tuple[np.ndarray, np.ndarray]:
+        """F_lambda blackbody on a fine uniform grid (Angstrom). Normalisation is arbitrary
+        since beam_factor is a ratio."""
+        h, c, k = 6.62607015e-34, 2.99792458e8, 1.380649e-23
+        wave = np.linspace(wmin, wmax, n)          # Angstrom
+        lam  = wave * 1e-10                          # m
+        flux = (2*h*c**2 / lam**5) / (np.exp(h*c/(lam*k*temp)) - 1.0)   # F_lambda
+        return wave, flux
 
     def transmission(self) -> tuple[np.ndarray, np.ndarray]:
         if self.band_index == 1:
@@ -119,6 +158,29 @@ class effective_wavelength:
         wave, trans = np.loadtxt(f"./transmission/{filt}", usecols=(0,1), unpack=True)
         self.logger.info(f"Loaded the wavelength and transmission for filter {filt}")
         return wave, trans
+
+    def beam_factor(self, wave_spec, flux_spec) -> float:
+        """
+        Photon-weighted <3 - alpha> over this band.
+        wave_spec, flux_spec : model spectrum F_lambda (Angstrom, per-Angstrom).
+        """
+        wave_filt, trans_filt = self.transmission()
+        T = np.interp(wave_spec, wave_filt, trans_filt, left=0.0, right=0.0)
+
+        c_Apers = 2.99792458e18
+        nu      = c_Apers / wave_spec
+        F_nu    = flux_spec * wave_spec**2 / c_Apers
+
+        order = np.argsort(nu)
+        alpha = np.empty_like(wave_spec)
+        alpha[order] = np.gradient(np.log(F_nu[order]), np.log(nu[order]))
+        B = 3.0 - alpha
+
+        w = T * wave_spec * flux_spec 
+        inband = w > 0
+        B_mean = np.trapz((w * B)[inband], wave_spec[inband]) / np.trapz(w[inband], wave_spec[inband])
+        self.logger.info(f"Band {self.band_index}: beam factor <3-alpha> = {B_mean:.4f}")
+        return B_mean
 
     def pivot_wave(self) -> float:
         wave, T = self.transmission()
