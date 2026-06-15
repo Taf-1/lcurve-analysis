@@ -69,9 +69,10 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
 
     changes = [
         ("period", "1.0", 2), ("period", "0", 5),
-        ("t0", "0.505", 2), ("t0", "0.005", 3), ("t0", "1", 5),
+        ("t0", "0.5", 2), ("t0", "0.005", 3), ("t0", "1", 5),
         ("q", "0", 5),
-        ("absorb", "0", 5),
+        ("absorb", "1", 5),
+        ("gravity_dark2", "1", 5),
         *ldc_gravity_fixes,
         ("tperiod", "1", 2),
         ("iangle", geom, 5),
@@ -360,10 +361,10 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         orig_dat  = f"{data_dir}/{gaia_id}_phase_data_file_{band_idx}"
         bin_width = 1.0 / len(phase_bin)
 
-        oot_mask  = flux_bin > 0.85
+        oot_mask  = flux_bin > 0.925
         ie_mask   = flux_bin < 0.5
         ingr_mask = ~oot_mask & ~ie_mask
-        categories = [oot_mask, ingr_mask, ie_mask]
+        categories = [oot_mask, ~oot_mask]   # OOT vs everything inside eclipse
         n_nonempty = sum(1 for m in categories if np.sum(m) > 0)
         weights    = np.zeros(len(flux_bin))
         for m in categories:
@@ -448,7 +449,6 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_levmarq", results_levmarq).lc_with_model(use_phase=True)
     plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_levmarq", results_levmarq)
     """
-    iglg
     results = {}
     for band_idx in band_order:
         con_lev    = f"{data_dir}/{gaia_id}_model_simplex_model_{band_idx}"
