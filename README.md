@@ -29,13 +29,20 @@ astroquery==0.4.11
 matplotlib==3.10.9
 emcee==3.1.6
 corner==2.2.3
+<<<<<<< HEAD
 tqdm==4.67.3
+=======
+>>>>>>> c25f1ac183269e60a08e195d91e1b7a5988913ed
 ```
 
 Install with:
 
 ```bash
+<<<<<<< HEAD
 pip install numpy==1.26.4 scipy==1.17.1 astropy==7.2.0 astroquery==0.4.11 emcee==3.1.6 corner==2.2.3 matplotlib==3.10.9 astropy-iers-data==0.2026.5.11.1.8.52 tqdm==4.67.3
+=======
+pip install numpy==1.26.4 scipy==1.17.1 astropy==7.2.0 astroquery==0.4.11 emcee==3.1.6 corner==2.2.3 matplotlib==3.10.9 astropy-iers-data==0.2026.5.11.1.8.52
+>>>>>>> c25f1ac183269e60a08e195d91e1b7a5988913ed
 ```
 
 ## Usage
