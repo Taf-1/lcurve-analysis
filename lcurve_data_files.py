@@ -27,32 +27,50 @@ class create_data_file:
         norm = np.mean(flux[oot_mask])
         flux /= norm
         flux_err /= norm
-        t = Time(float(self.t0), format='jd', scale='utc')
-        t0_tdb = t.tdb.mjd
+        t0_val = float(self.t0)
+        t0_tdb = Time(t0_val, format='jd', scale='tdb').mjd if t0_val > 2400000 else t0_val
         period_val = float(self.period)
-        n_cycles = round((time.min() - t0_tdb) / period_val)
+        t_mid = (time.min() + time.max()) / 2
+        n_cycles = round((t_mid - t0_tdb) / period_val)
         t0_nearby = t0_tdb + n_cycles * period_val
         return time, exp_time, flux, flux_err, t0_nearby
 
-    def extract_ngts_data(self) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, float]:
+    def extract_ngts_data(self) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, float, int]:
         self.logger.info(f"Loading NGTS data from {self.filename}")
         with fits.open(str(self.filename)) as f:
             data = f[1].data
-        t = Time(data['bjd_mid'], format='jd', scale='utc')
-        time = t.tdb.mjd
+
+        t = Time(data['bjd_mid'], format='jd', scale='tdb')
+        time = t.mjd
+
         cadence = 13 / 86400
+
         f = data['flux_3']
-        flux = f / np.nanmedian(f)
         f_err = data['fluxerr_3']
-        flux_err = f_err / np.nanmedian(f)
+
+        oot_mask = f > 0.85 * np.nanmedian(f)
+        oot_norm = np.nanmean(f[oot_mask])
+
+        flux = f / oot_norm
+        flux_err = f_err / oot_norm
+
         self.logger.info(f"Loaded {len(time)} data points")
         self.logger.info(f"Time range: {time.min():.6f} to {time.max():.6f} BMJD (TDB)")
-        t0_tdb   = Time(float(self.t0), format='jd', scale='tdb').mjd
-        t_mid    = (time.min() + time.max()) / 2.0
-        n_cycles = round((t_mid - t0_tdb) / self.period)
-        t0_nearby = t0_tdb + n_cycles * self.period
-        return time, cadence, flux, flux_err, t0_nearby
 
+        t0_val = float(self.t0)
+        t0_tdb = Time(t0_val, format='jd', scale='tdb').mjd if t0_val > 2400000 else t0_val
+        period_val = float(self.period)
+
+        cycles = np.round((time - t0_tdb) / period_val).astype(int)
+        unique_cycles = np.unique(cycles)
+        cycle_ref = unique_cycles[len(unique_cycles) // 2]
+
+        t0_nearby = t0_tdb + cycle_ref * period_val
+
+        self.logger.info(f"Reference cycle = {cycle_ref}")
+        self.logger.info(f"Reference eclipse = {t0_nearby:.10f}")
+
+        return time, cadence, flux, flux_err, t0_nearby, abs(cycle_ref)
 
 class adjust_data_file:
     def __init__(self, time: np.ndarray, flux: np.ndarray, flux_errors: np.ndarray, binfact: int) -> None:

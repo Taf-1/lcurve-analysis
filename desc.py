@@ -35,12 +35,13 @@ def read_param(config, name):
     raise KeyError(name)
 
 def change_params(logger: logging.Logger, config: str, path: str, period: float, t0: float, band_index: int,
-                  wd_ldc: list[float], comp_ldc: list[float], gdc: list[float], wavelength: float, 
+                  wd_ldc: list[float], comp_ldc: list[float], wd_gdc: float, comp_gdc: float, wavelength: float, 
                   bf1: float, bf2: float, fix_geometry: bool = False) -> str:
     new_config = f"{path}/ultracam_model_file_{band_index}"
     a1,  a2,  a3,  a4  = wd_ldc
     a1c, a2c, a3c, a4c = comp_ldc
-    y1, y2 = gdc
+    y1 = wd_gdc
+    y2 = comp_gdc
     period = float(period)
     t0 = float(t0)
     geom = "0" if fix_geometry else "1"
@@ -57,18 +58,18 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         ("t2", geom, 5),
         ("absorb", geom, 5),
         # WD limb darkening: set value and lock
-        ("ldc1_1", f"{a1}", 2), ("ldc1_1", "1", 5),
-        ("ldc1_2", f"{a2}", 2), ("ldc1_2", "1", 5),
-        ("ldc1_3", f"{a3}", 2), ("ldc1_3", "1", 5),
-        ("ldc1_4", f"{a4}", 2), ("ldc1_4", "1", 5),
+        ("ldc1_1", f"{a1}", 2), ("ldc1_1", geom, 5),
+        ("ldc1_2", f"{a2}", 2), ("ldc1_2", geom, 5),
+        ("ldc1_3", f"{a3}", 2), ("ldc1_3", geom, 5),
+        ("ldc1_4", f"{a4}", 2), ("ldc1_4", geom, 5),
         # Companion limb darkening: set value and lock
-        ("ldc2_1", f"{a1c}", 2), ("ldc2_1", "1", 5),
-        ("ldc2_2", f"{a2c}", 2), ("ldc2_2", "1", 5),
-        ("ldc2_3", f"{a3c}", 2), ("ldc2_3", "1", 5),
-        ("ldc2_4", f"{a4c}", 2), ("ldc2_4", "1", 5),
+        ("ldc2_1", f"{a1c}", 2), ("ldc2_1", geom, 5),
+        ("ldc2_2", f"{a2c}", 2), ("ldc2_2", geom, 5),
+        ("ldc2_3", f"{a3c}", 2), ("ldc2_3", geom, 5),
+        ("ldc2_4", f"{a4c}", 2), ("ldc2_4", geom, 5),
         # Gravity darkening: set value and lock
-        ("gravity_dark1", f"{y1}", 2), ("gravity_dark1", "1", 5),
-        ("gravity_dark2", f"{y2}", 2), ("gravity_dark2", "1", 5),
+        ("gravity_dark1", f"{y1}", 2), ("gravity_dark1", geom, 5),
+        ("gravity_dark2", f"{y2}", 2), ("gravity_dark2", geom, 5),
         # 3-part lines: wavelength and beam factors 
         ("wavelength", f"{wavelength}", 2),
         ("beam_factor1", f"{bf1}", 2), ("beam_factor2", "0", 5),
@@ -80,7 +81,7 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         cur_period = read_param(config, "period")  
         changes += [
             ("period",  cur_period, 2), ("period",  "0", 5),
-            ("tperiod", cur_period, 2), ("t0", "1", 5),         
+            ("tperiod", cur_period, 2), ("t0", "0", 5),         
         ]
     else:
         changes += [
@@ -112,14 +113,15 @@ def run_model(logger: logging.Logger, filename: str, band_index: int, t0: float,
     ).write_data_file()
 
     claret = claret_tables_interp(logger, wd_temp, wd_logg, wd_type, comp_temp, comp_logg, filt)
-    wd_ldc   = claret.wd_limb_darkening()
+    wd_ldc = claret.wd_limb_darkening()
     comp_ldc = claret.comp_limb_darkening()
-    gdc      = claret.gravity_darkening()
+    wd_gdc = claret.wd_gravity_darkening()
+    comp_gdc = claret.comp_gravity_darkening()
 
     ew = effective_wavelength(logger, band_index)
     wavelength = ew.pivot_wave()
 
-    wd_wave, wd_flux     = effective_wavelength.load_speedyfit_spectrum(wd_model_path)
+    wd_wave, wd_flux = effective_wavelength.load_speedyfit_spectrum(wd_model_path)
     comp_wave, comp_flux = effective_wavelength.blackbody_spectrum(comp_temp)
     bf1 = ew.beam_factor(wd_wave, wd_flux)
     bf2 = ew.beam_factor(comp_wave, comp_flux)
@@ -135,7 +137,7 @@ def run_model(logger: logging.Logger, filename: str, band_index: int, t0: float,
 
     model_config = change_params(
         logger, base_model, pathname, period, t0_nearby, band_index,
-        wd_ldc, comp_ldc, gdc, wavelength, bf1, bf2, fix_geometry
+        wd_ldc, comp_ldc, wd_gdc, comp_gdc, wavelength, bf1, bf2, fix_geometry
     )
 
     ultracam_prelim = f"{pathname}/{tar_name}_ultracam_model_file_{band_index}"

@@ -2,6 +2,7 @@ import logging
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from scipy.stats import median_abs_deviation as MAD
 
 mpl.rcParams.update({
     "font.family": "serif",
@@ -159,7 +160,7 @@ class lcurve_model_plot:
             else:
                 x_data = res['time'] - res['t0_nearby']
                 x_model = res['time_model']
-                xlim = (0, max(x_data))
+                xlim = (min(x_data), max(x_data))
                 xlabel= f"BMJD (TDB) - {res['t0_nearby']:.2f}"
             model_line, = ax_main.plot(x_model, res['flux_model'],
                         color='black', lw=2, zorder=5)
@@ -173,8 +174,7 @@ class lcurve_model_plot:
             ax_main.set_ylim(-0.1, 1.3)
             ax_main.set_xlim(*xlim)
             oot_mask = res['flux'] > 0.85
-            rse = np.sqrt(np.sum((res['flux'][oot_mask] - res['flux_model'][oot_mask])**2) /
-                            (len(res['flux_model'][oot_mask]) - 2))
+            rse = 1.4826 * MAD(res['flux'][oot_mask] - res['flux_model'][oot_mask])
             residuals_sigma = (res['flux'] - res['flux_model']) / rse
             ax_res.errorbar(x_data, residuals_sigma,
                         color=colour, fmt='o', markersize=3, alpha=0.7)

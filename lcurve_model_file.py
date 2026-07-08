@@ -33,7 +33,11 @@ For the gravity darkening 1 & 2, Claret et al. 2020 gives J/A+A/634/A93/tabley f
         S4 = Spitzer filter 4, 8.0um
         uvby = Stroemgren uvby filters
         UBVRIJHK = Johnson-Cousins UBVRIJHK filters
-        u'g'r'i'z' = SDSS u'g'r'i'z' filters        
+        u'g'r'i'z' = SDSS u'g'r'i'z' filters  
+    assume beta_1 = 1.0, then y = y1+y2 for WD
+
+For the gravity darkening of the companion, Claret et al. 2011 gives J/A+A/529/A75/tabley for single value: 
+          
 """
 import logging
 import numpy as np
@@ -41,6 +45,8 @@ from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from astroquery.vizier import Vizier
 from astropy.table import Table
 from scipy.optimize import minimize
+
+Vizier.VIZIER_SERVER = "vizier.cfa.harvard.edu"
 
 class claret_tables_interp:
     def __init__(self, logger: logging.Logger, wd_temp: float, wd_logg: float, wdtype: str, comp_temp: float, comp_logg: float, filt: str) -> None:
@@ -54,7 +60,7 @@ class claret_tables_interp:
 
     @staticmethod
     def query_vizier(logger: logging.Logger, vizier_catalogue: str) -> Table:
-        Vizier.ROW_LIMIT = 30000
+        Vizier.ROW_LIMIT = 500000
         cat = Vizier.get_catalogs(vizier_catalogue)
         logger.info(f"Queried the {vizier_catalogue} catalogue ...")
         return cat[0]
@@ -117,13 +123,33 @@ class claret_tables_interp:
 
         return a1, a2, a3, a4
 
-    def gravity_darkening(self) -> tuple[float, float]:
+    def wd_gravity_darkening(self) -> float:
         data = self.query_vizier(self.logger, "J/A+A/634/A93/tabley")
         mask = (data["Filter"] == self.filt) & (data["Mod"] == self.wdtype)
         filt_data = data[mask]
         y1, y2 = self.itp(self.logger, filt_data, self.wd_logg, self.wd_temp, 'gdc')
-        """y2 = 0.08"""
-        return y1, y2
+        y = y1+y2
+        return y1
+
+    def comp_gravity_darkening(self) -> float:
+        data = self.query_vizier(self.logger, "J/A+A/529/A75/tabley")
+        mask = ((data["Filt"] == self.filt)
+                & (data["Mod"]  == "P") 
+                & (data["Z"]    == 0.0))
+        sub = data[mask]
+        print(sub)
+        if len(sub) == 0:
+            raise ValueError(f"No GDC rows for filt={self.filt}, PHOENIX, Z=0, xi=2")
+
+        logT_target = np.log10(self.comp_temp)
+        logg_target = min(self.comp_logg, sub["logg"].max())  
+        dist = ((sub["logTeff"] - logT_target) ** 2
+                + (sub["logg"] - logg_target) ** 2)
+        row = sub[np.argmin(dist)]
+        self.logger.info(f"GDC({self.filt}): y={row['y']:.4f} at "
+                        f"logTeff={row['logTeff']} (target {logT_target:.3f}), "
+                        f"logg={row['logg']} (target {self.comp_logg}, clamped {logg_target})")
+        return float(row["y"])
 
 class effective_wavelength:
     def __init__(self, logger: logging.Logger, band_index: int) -> None:
