@@ -1,12 +1,12 @@
 import subprocess
 import logging
 
-NMAX = "2000"
+NMAX = "5000"
 DELTA = "0.01"
 LMAX = "2e10"
 SCALE = "yes"
 NOISE = "0.0"
-SEED = "57565"
+SEED = "12345"
 NFILE = "1"
 DEVICE = "/null"
 FTOL = "1e-012"
@@ -34,7 +34,8 @@ class lcurve:
 
     def lroche(self) -> None:
         try:
-            subprocess.run(["lroche", self.MODEL, self.DATA, NOISE, SEED, NFILE, self.OUTPUT, DEVICE, SCALE], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["lroche", self.MODEL, self.DATA, NOISE, SEED, NFILE, self.OUTPUT, DEVICE, SCALE],
+                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError as e:
             self.logger.info(f"lroche failed: {e}")
             raise RuntimeError(f"lroche failed: {e}")

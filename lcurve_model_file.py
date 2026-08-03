@@ -45,8 +45,22 @@ from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from astroquery.vizier import Vizier
 from astropy.table import Table
 from scipy.optimize import minimize
+import astropy.io.ascii as ascii
+import os
 
 Vizier.VIZIER_SERVER = "vizier.cfa.harvard.edu"
+
+def roche_distortion(r_VA_a: float, q: float) -> float:
+    """
+    Correct scaled volume-averaged radius to roche distorted radius towards L1
+    given the mass ratio (M2/M1)
+    """
+    fname = './data/roche_conversion/roche_grid_new_corr.dat'
+    q_grid, r2_a_L1, r2_va_a = np.loadtxt(fname, unpack=True)
+    coords_in = list(zip(q_grid, r2_va_a))
+    coords_out = list(r2_a_L1)
+    roche_interpolator = LinearNDInterpolator(coords_in, coords_out, rescale=True)
+    return roche_interpolator(q, r_VA_a)
 
 class claret_tables_interp:
     def __init__(self, logger: logging.Logger, wd_temp: float, wd_logg: float, wdtype: str, comp_temp: float, comp_logg: float, filt: str) -> None:
@@ -78,49 +92,50 @@ class claret_tables_interp:
                 logger.info(f"{col}: outside convex hull, using nearest neighbour")
             return float(val)
 
-        if coef == "ldc":
-            a1, a2, a3, a4 = (interp_param(p) for p in ['a1', 'a2', 'a3', 'a4'])
-            logger.info(f"Interpolated to get the {coef} coefficients via the Claret 4-term law")
-            return a1, a2, a3, a4
-        else:
-            y1, y2 = (interp_param(p) for p in ['y1', 'y2'])
-            logger.info(f"Interpolated to get the {coef} coefficients via the Claret 2-term law")
-            return y1, y2
+        y1, y2 = (interp_param(p) for p in ['y1', 'y2'])
+        logger.info(f"Interpolated to get the {coef} coefficients via the Claret 2-term law")
+        return y1, y2
 
     @staticmethod
-    def refit_4term(I_target: np.ndarray, mu: np.ndarray) -> tuple[float, float, float, float]:
-        # I(mu) = 1 - B @ a, linear in a
+    def refit_4term(I_target: np.ndarray, mu: np.ndarray, logger=None) -> tuple[float, float, float, float]:
         B  = np.column_stack([1.0 - mu**(k/2) for k in (1, 2, 3, 4)])
         y  = 1.0 - I_target
-        a0, *_ = np.linalg.lstsq(B, y, rcond=None)            # unconstrained start
+        a0, *_ = np.linalg.lstsq(B, y, rcond=None)
 
-        # min ||B a - y||^2  s.t.  I(mu) = 1 - B a >= 0  on the grid
         obj  = lambda a: float((B @ a - y) @ (B @ a - y))
         cons = {"type": "ineq", "fun": lambda a: 1.0 - B @ a}
         res  = minimize(obj, a0, constraints=cons, method="SLSQP")
+
+        if not res.success and logger is not None:
+            logger.warning(f"4-term LDC refit did not converge: {res.message}. "
+                        f"Using best-effort coefficients.")
+
         return tuple(float(x) for x in res.x)
 
     def wd_limb_darkening(self) -> tuple[float, float, float, float]:
-        data = self.query_vizier(self.logger, "J/A+A/634/A93/tablea4")
-        mask = (data["Filter"] == self.filt) & (data["Mod"] == self.wdtype)
-        filt_data = data[mask]
-        a1, a2, a3, a4 = self.itp(self.logger, filt_data, self.wd_logg, self.wd_temp, 'ldc')
+        filt_query = self.filt.replace("'", "")
+        fname = f"./data/ld_coeffs/DA_LDCs_ucam_{filt_query}s.dat"
+        tab_wd = Table.read(fname, format='ascii')
+        wd_coords_in = list(zip(tab_wd['Teff'], tab_wd['log(g)']))
+        wd_coords_out = list(zip(tab_wd['a1'], tab_wd['a2'],
+                                tab_wd['a3'], tab_wd['a4']))
+        ld_wd_interpolators = LinearNDInterpolator(wd_coords_in,
+                                                        wd_coords_out,
+                                                        rescale=True)
+        a1, a2, a3, a4 = ld_wd_interpolators(self.wd_temp, self.wd_logg)
         return a1, a2, a3, a4
 
     def comp_limb_darkening(self) -> tuple[float, float, float, float]:
-        data = self.query_vizier(self.logger, "J/A+A/546/A14/limb6")
-        mask = (data["Filt"] == self.filt) & (data["Mod"] == 's')
-        filt_data = data[mask]
-        a1, a2, a3, a4 = self.itp(self.logger, filt_data, self.comp_logg, self.comp_temp, 'ldc')
-
-        mu = np.linspace(0.0, 1.0, 101)
-        a  = (a1, a2, a3, a4)
-        I  = 1.0 - sum(ak * (1.0 - mu**(k/2)) for k, ak in enumerate(a, start=1))
-        if I.min() < 0.0:
-            self.logger.info(f"Companion I(mu) dips to {I.min():.4f}; clamping at 0 and refitting")
-            I = np.clip(I, 0.0, None)
-            a1, a2, a3, a4 = self.refit_4term(I, mu)
-
+        filt_query = self.filt.replace("'", "")
+        fname = f"./data/ld_coeffs/MS_LDCs_ucam_{filt_query}s.dat"
+        tab_ms = Table.read(fname, format='ascii')
+        ms_coords_in = list(zip(tab_ms['Teff'], tab_ms['log(g)']))
+        ms_coords_out = list(zip(tab_ms['a1'], tab_ms['a2'],
+                                tab_ms['a3'], tab_ms['a4']))
+        ld_ms_interpolators = LinearNDInterpolator(ms_coords_in,
+                                                        ms_coords_out,
+                                                        rescale=True)
+        a1, a2, a3, a4 = ld_ms_interpolators(self.comp_temp, self.comp_logg)
         return a1, a2, a3, a4
 
     def wd_gravity_darkening(self) -> float:
@@ -129,27 +144,19 @@ class claret_tables_interp:
         filt_data = data[mask]
         y1, y2 = self.itp(self.logger, filt_data, self.wd_logg, self.wd_temp, 'gdc')
         y = y1+y2
-        return y1
+        return y
 
     def comp_gravity_darkening(self) -> float:
-        data = self.query_vizier(self.logger, "J/A+A/529/A75/tabley")
-        mask = ((data["Filt"] == self.filt)
-                & (data["Mod"]  == "P") 
-                & (data["Z"]    == 0.0))
-        sub = data[mask]
-        print(sub)
-        if len(sub) == 0:
-            raise ValueError(f"No GDC rows for filt={self.filt}, PHOENIX, Z=0, xi=2")
-
-        logT_target = np.log10(self.comp_temp)
-        logg_target = min(self.comp_logg, sub["logg"].max())  
-        dist = ((sub["logTeff"] - logT_target) ** 2
-                + (sub["logg"] - logg_target) ** 2)
-        row = sub[np.argmin(dist)]
-        self.logger.info(f"GDC({self.filt}): y={row['y']:.4f} at "
-                        f"logTeff={row['logTeff']} (target {logT_target:.3f}), "
-                        f"logg={row['logg']} (target {self.comp_logg}, clamped {logg_target})")
-        return float(row["y"])
+        filt_query = self.filt.replace("'", "")
+        fname = f"./data/gravity_darkening_coeffs/MS_GDCs_{filt_query}s.dat"
+        gdcs = ascii.read(fname)
+        coords_in = list(zip(gdcs['Teff'], gdcs['log(g)']))
+        coords_out = list(gdcs['y'])
+        gdark_interpolator = LinearNDInterpolator(coords_in,
+                                                coords_out,
+                                                rescale=True)
+        y = gdark_interpolator(self.comp_temp, self.comp_logg)
+        return float(y)
 
 class effective_wavelength:
     def __init__(self, logger: logging.Logger, band_index: int) -> None:
@@ -173,15 +180,15 @@ class effective_wavelength:
 
     def transmission(self) -> tuple[np.ndarray, np.ndarray]:
         if self.band_index == 1:
-            filt = "SLOAN_SDSS.u.dat"
+            filt = "./data/filter_profiles/ucam_us.txt"
         elif self.band_index == 2:
-            filt = "SLOAN_SDSS.g.dat"
+            filt = "./data/filter_profiles/ucam_gs.txt"
         elif self.band_index == 3:
-            filt = "SLOAN_SDSS.i.dat"
+            filt = "./data/filter_profiles/ucam_is.txt"
         else:
             self.logger.error(f"Invalid band_index: {self.band_index}")
             raise ValueError(f"Invalid band_index: {self.band_index}")
-        wave, trans = np.loadtxt(f"./transmission/{filt}", usecols=(0,1), unpack=True)
+        wave, trans = np.loadtxt(f"{filt}", usecols=(0,1), unpack=True)
         self.logger.info(f"Loaded the wavelength and transmission for filter {filt}")
         return wave, trans
 
@@ -226,7 +233,6 @@ class adjust_parameters:
 
     def change_config(self) -> str:
         with open(self.model_file, "r") as fin, open(self.new_model_file, "w") as fout:
-            self.logger.info(f"Opened {self.model_file} for modifications")
             for line in fin:
                 parts = line.split()
                 if len(parts) >= 2 and parts[1] == '=':
@@ -235,15 +241,12 @@ class adjust_parameters:
                             parts[idx] = f"{val}"
                     line = " ".join(parts) + "\n"
                 fout.write(line) 
-
-        self.logger.info(f"Modifications complete and saved to - {self.new_model_file}")
         return self.new_model_file
     
     def load_mcmc_params(self) -> tuple[list[str], np.ndarray, np.ndarray]:
         params = []
         names = []
         steps = []
-        self.logger.info(f"Opening {self.new_model_file} to get pbest & steps for MCMC analysis")
         with open(self.new_model_file, "r") as f:
             for line in f:
                 parts = line.split()
@@ -256,5 +259,4 @@ class adjust_parameters:
                         names.append(name)
                         params.append(float(param_value))
                         steps.append(float(step))
-        self.logger.info(f"Saved names, pbest and steps - ready for MCMC analysis")
         return names, np.array(params), np.array(steps)

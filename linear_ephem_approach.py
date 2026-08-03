@@ -7,6 +7,7 @@ import numpy as np
 from astropy.time import Time
 from astropy.io import fits
 from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt 
 
 def arg_parse():
     p = ap.ArgumentParser(description="Linear Ephemeris Approach for Transit Timing Variations")
@@ -237,6 +238,21 @@ def fit_quadratic_ephemeris(tmins, tmin_errs, epochs, chi2_linear, logger):
         logger.info(f"  -> possible period change detected at {sig:.1f} sigma -- "
                     f"verify against systematics before claiming a detection")
     return pdot, pdot_err, sig
+
+def bin_data_on_phase(phase: np.ndarray, flux: np.ndarray, flux_err: np.ndarray, binfact: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if binfact is None:
+        binfact = 12
+    if len(phase) <= 11:
+        binfact = len(phase)
+    n_binned = int(len(phase) / binfact)
+    binned_len = int(n_binned * binfact)
+    temp = zip(phase[:binned_len], flux[:binned_len], flux_err[:binned_len])
+    temp = sorted(temp)
+    phase_s, flux_s, flux_err_s = map(np.array, zip(*temp))
+    phase_bin     = np.average(phase_s.reshape(n_binned, binfact),     axis=1)
+    flux_bin      = np.average(flux_s.reshape(n_binned, binfact),      axis=1)
+    flux_err_bin  = np.average(flux_err_s.reshape(n_binned, binfact),  axis=1)
+    return phase_bin, flux_bin, flux_err_bin
 
 def run(cfg: dict, logger: logging.Logger):
 
@@ -510,6 +526,25 @@ def run(cfg: dict, logger: logging.Logger):
             fh.write(f"paper_t0_BMJD = {t0_paper:.10f}\n")
             fh.write(f"paper_OC_s    = {oc_paper*86400:.2f}  ({abs(n_cyc):.0f} cycles from T0)\n")
     logger.info(f"Ephemeris written to {eph_path}")
+    
+    logger.info("Phase folding NGTS using new ephemeris")
+    t_fold = ((time - T0) % P) / P
+    loc = np.where(t_fold > 0.5)[0]
+    t_fold[loc] -= 1
+    t_fold += 0.5
+    phase_bin, flux_bin, flux_err_bin = bin_data_on_phase(
+            t_fold, flux, flux_err, 15
+        )
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.errorbar(phase_bin, flux_bin, yerr=flux_err_bin, fmt='o', markersize=3, alpha=0.7,
+                    zorder=3)
+    ax.set_ylabel("Normalized Flux")
+    ax.set_xlim(0, 1)
+    ax.set_xlabel(r"Phase ($\phi$)")
+    eph_phot_path = os.path.join(cfg["data_root"], cfg["name"], "eph_phased_lc.png")
+    plt.savefig(eph_phot_path, bbox_inches='tight', dpi=300)
+    plt.close(fig)
+    logger.info(f"Phase-folded light curve written to {eph_phot_path}")
 
 if __name__ == "__main__":
     args = arg_parse()

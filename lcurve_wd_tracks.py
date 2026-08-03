@@ -4,7 +4,8 @@ import numpy as np
 import glob
 import os
 import re
-from scipy.interpolate import RegularGridInterpolator, interp1d
+from scipy.interpolate import RegularGridInterpolator, interp1d, PchipInterpolator, LinearNDInterpolator
+import astropy.io.ascii as ascii
 
 # --- constants (cgs) ---
 G     = 6.67430e-8
@@ -13,7 +14,7 @@ MSUN  = 1.98892e33
 LSUN  = 3.828e33
 RSUN  = 6.957e10
 
-MASS_THRESHOLD = 0.45  # Msun; <= -> He (Panei), > -> C/O (Bedard)
+MASS_THRESHOLD = 0.44  # Msun; <= -> He (Panei), > -> C/O (Bedard)
 
 _MODULE_DIR       = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_PANEI_DIR  = os.path.join(_MODULE_DIR, "PaneiTracks2007")
@@ -237,20 +238,20 @@ class WDTrackInterpolator:
     for the He-core (Panei 2007, mass ≤ MASS_THRESHOLD) and C/O-core (Bedard 2020,
     mass > MASS_THRESHOLD) grids.
 
-    sigma_R : float
-        Gaussian width [R_sun] used by the MCMC prior (default 0.001 R_sun ≈ 7% for a
-        typical 0.6 Msun WD).  Set to a larger value to widen the prior.
+    sigma_R_frac : float
+        Fractional Gaussian width used by the MCMC prior (default 0.03 = 3% of
+        predicted radius).  Set to a larger value to widen the prior.
     """
 
     def __init__(self, logger: logging.Logger,
                  panei_dir:  str | None = None,
                  bedard_dir: str | None = None,
                  spec_type:  str = "DA",
-                 sigma_R:    float = 0.003,
+                 sigma_R:    float = 0.03,
                  logg1_ref:  float | None = None,
                  logg1_err:  float | None = None) -> None:
-        self.logger    = logger
-        self.sigma_R   = sigma_R
+        self.logger      = logger
+        self.sigma_R_frac = sigma_R
         self.logg1_ref = logg1_ref
         self.logg1_err = logg1_err
         spec_type      = spec_type.upper()
@@ -293,7 +294,11 @@ class WDTrackInterpolator:
         return seqs
 
     def _build_interp(self, seqs: list, label: str) -> tuple:
-        """Build RegularGridInterpolators for R and logg on a (mass, Teff) grid.
+        """
+        Build RegularGridInterpolators for R and logg on a (mass, Teff) grid.
+        The mass axis is resampled with monotone PCHIP (in log R - log M for the
+        radius) onto a fine grid so the prior is smooth in mass rather than
+        piecewise-linear between track sequences.
 
         Returns (R_interp, logg_interp); either may be None if seqs is empty.
         """
@@ -303,6 +308,11 @@ class WDTrackInterpolator:
 
         seqs.sort(key=lambda x: x[0])
         masses = np.array([s[0] for s in seqs])
+
+        if not np.all(np.diff(masses) > 0):
+            raise ValueError(
+                f"WDTrackInterpolator: duplicate {label} track masses {masses} — "
+                "check for duplicate/backup files matching the glob pattern")
 
         teff_min = max(s[1].min() for s in seqs)
         teff_max = min(s[1].max() for s in seqs)
@@ -336,14 +346,14 @@ class WDTrackInterpolator:
         return self._bedard_R_interp, self._bedard_lg_interp
 
     def predict_radius(self, teff: float, mass: float) -> float:
-        """Return predicted WD radius [R_sun] for the given Teff [K] and mass [M_sun]."""
+        """Predicted WD radius [R_sun] at (Teff [K], mass [M_sun]); NaN if off-grid."""
         R_interp, _ = self._interps(mass)
         if R_interp is None:
             return np.nan
         return float(R_interp([[mass, teff]]))
 
     def predict_logg(self, teff: float, mass: float) -> float:
-        """Return predicted WD log g (cgs) for the given Teff [K] and mass [M_sun]."""
+        """Predicted WD log g (cgs) at (Teff [K], mass [M_sun]); NaN if off-grid."""
         _, lg_interp = self._interps(mass)
         if lg_interp is None:
             return np.nan
@@ -352,43 +362,32 @@ class WDTrackInterpolator:
 class CompTrackInterpolator:
     """Companion mass–radius prior from BHAC15 tracks.
 
-    Radius at these masses (~0.07–0.11 Msun) is age-converged above ~1 Gyr,
-    so we take the oldest tabulated age per mass and interpolate in mass only.
+    Uses a 1D np.interp on mass at a fixed target logg slice (default 5.0).
+    LinearNDInterpolator (Qhull) deadlocks when called from forked worker
+    processes, so we precompute a plain numpy lookup table instead.
     """
 
     def __init__(self, logger: logging.Logger, track_file: str,
                  sigma_R_frac: float = 0.06,
-                 m_min: float = 0.070, m_max: float = 0.110) -> None:
+                 m_min: float = 0.010, m_max: float = 0.110,
+                 target_logg: float = 5.0) -> None:
         self.logger = logger
         self.sigma_R_frac = sigma_R_frac
+        self.track_file = track_file
 
-        masses, radii = {}, {}
-        with open(track_file) as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 6 or parts[0].startswith(("!", "#")):
-                    continue
-                try:
-                    m    = float(parts[0])
-                    logt = float(parts[1])
-                    r    = float(parts[5])
-                except ValueError:
-                    continue   
-                if m_min <= m <= m_max:
-                    if m not in masses or logt > masses[m]:
-                        masses[m] = logt
-                        radii[m]  = r
+        self.logger.info(f"Loading companion mass-radius tracks from {track_file}")
+        baraffe = ascii.read(track_file)
+        masses = np.unique(baraffe['M/Ms'])
+        m_arr, r_arr = [], []
+        for m in masses:
+            rows = baraffe[baraffe['M/Ms'] == m]
+            idx = np.argmin(np.abs(np.array(rows['g']) - target_logg))
+            m_arr.append(float(m))
+            r_arr.append(float(rows['R/Rs'][idx]))
+        self._mass = np.array(m_arr)
+        self._radius = np.array(r_arr)
 
-        if len(radii) < 3:
-            raise ValueError(f"Too few tracks in [{m_min}, {m_max}] Msun")
-
-        m_grid = np.array(sorted(radii))
-        r_grid = np.array([radii[m] for m in m_grid])
-        self.m_min, self.m_max = m_grid[0], m_grid[-1]
-        self._interp = interp1d(m_grid, r_grid, kind="linear",
-                                bounds_error=False, fill_value=np.nan)
-        self.logger.info(f"Companion M–R prior: masses {m_grid}, radii {r_grid}, "
-                         f"sigma_R = {sigma_R_frac:.0%} of R_pred")
-
-    def predict_radius(self, m2_msun: float) -> float:
-        return float(self._interp(m2_msun))
+    def predict_radius(self, m2_msun: float, logg: float = 5.0) -> float:
+        if m2_msun < self._mass[0] or m2_msun > self._mass[-1]:
+            return np.nan
+        return float(np.interp(m2_msun, self._mass, self._radius))

@@ -12,7 +12,7 @@ class create_data_file:
         self.t0 = t0
         self.period = period
 
-    def extract_ultracam_data(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+    def extract_ultracam_data(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
         with fits.open(str(self.filename)) as f:
             self.logger.info(f"FITS file has {len(f)} extensions")
             if self.band_index >= len(f):
@@ -24,7 +24,7 @@ class create_data_file:
         flux = np.array(data['Flux'], dtype=float)
         flux_err = np.array(data['Flux_err'], dtype=float)
         oot_mask = (flux > 0.85 * np.median(flux))
-        norm = np.mean(flux[oot_mask])
+        norm = np.mean(flux[oot_mask])   # OOT mean in Jy — returned for mJy plotting
         flux /= norm
         flux_err /= norm
         t0_val = float(self.t0)
@@ -33,7 +33,7 @@ class create_data_file:
         t_mid = (time.min() + time.max()) / 2
         n_cycles = round((t_mid - t0_tdb) / period_val)
         t0_nearby = t0_tdb + n_cycles * period_val
-        return time, exp_time, flux, flux_err, t0_nearby
+        return time, exp_time, flux, flux_err, t0_nearby, norm
 
     def extract_ngts_data(self) -> tuple[np.ndarray, float, np.ndarray, np.ndarray, float, int]:
         self.logger.info(f"Loading NGTS data from {self.filename}")

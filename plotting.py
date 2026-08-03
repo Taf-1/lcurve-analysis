@@ -8,11 +8,11 @@ mpl.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
     "mathtext.fontset": "stix",
-    "font.size": 12,
-    "axes.labelsize": 13,
-    "axes.titlesize": 13,
-    "xtick.labelsize": 11,
-    "ytick.labelsize": 11,
+    "font.size": 14,
+    "axes.labelsize": 14,
+    "axes.titlesize": 14,
+    "xtick.labelsize": 12,
+    "ytick.labelsize": 12,
     "axes.linewidth": 1.2,
     "lines.linewidth": 1.5,
     "xtick.direction": "in",
@@ -140,8 +140,9 @@ class lcurve_model_plot:
         self.fig_name = fig_name
         self.results = results
 
-    def lc_with_model(self, use_phase: bool = True) -> None:
-        fig = plt.figure(figsize=(10, 12))
+    def lc_with_model(self, use_phase: bool = True,
+                      oot_norms_jy: dict | None = None) -> None:
+        fig = plt.figure(figsize=(8, 12))
         gs = fig.add_gridspec(6, 1, height_ratios=[3, 1, 3, 1, 3, 1], hspace=0.05)
         plot_order = [1, 2, 3]
         band_colours = {1: 'blue', 2: 'green', 3: 'red'}
@@ -152,6 +153,15 @@ class lcurve_model_plot:
             ax_res  = fig.add_subplot(gs[plot_idx*2 + 1, 0], sharex=ax_main)
             res = self.results[band_idx]
             colour = band_colours[band_idx]
+
+            # mJy scaling: multiply normalised flux by OOT norm in mJy
+            scale = (oot_norms_jy[band_idx] * 1e3
+                     if (oot_norms_jy and band_idx in oot_norms_jy) else 1.0)
+            y_data  = res['flux']       * scale
+            y_err   = res['flux_err']   * scale
+            y_model = res['flux_model'] * scale
+            ylabel  = "Flux (mJy)" if scale != 1.0 else "Normalized Flux"
+
             if use_phase:
                 x_data = res['phase']
                 x_model = res['phase_model']
@@ -162,20 +172,19 @@ class lcurve_model_plot:
                 x_model = res['time_model']
                 xlim = (min(x_data), max(x_data))
                 xlabel= f"BMJD (TDB) - {res['t0_nearby']:.2f}"
-            model_line, = ax_main.plot(x_model, res['flux_model'],
+            model_line, = ax_main.plot(x_model, y_model,
                         color='black', lw=2, zorder=5)
             model_lines.append(model_line)
-            ax_main.errorbar(x_data, res['flux'],
-                            yerr=res['flux_err'],
+            ax_main.errorbar(x_data, y_data,
+                            yerr=y_err,
                             color=colour, fmt='o', markersize=3, alpha=0.7,
                             zorder=3)
-            ax_main.set_ylabel("Normalized Flux")
+            ax_main.set_ylabel(ylabel)
             plt.setp(ax_main.get_xticklabels(), visible=False)
-            ax_main.set_ylim(-0.1, 1.3)
+            ax_main.set_ylim(-0.1 * scale, 1.3 * scale)
             ax_main.set_xlim(*xlim)
-            oot_mask = res['flux'] > 0.85
-            rse = 1.4826 * MAD(res['flux'][oot_mask] - res['flux_model'][oot_mask])
-            residuals_sigma = (res['flux'] - res['flux_model']) / rse
+            model_at_data = np.interp(x_data, x_model, y_model)
+            residuals_sigma = (y_data - model_at_data) / y_err
             ax_res.errorbar(x_data, residuals_sigma,
                         color=colour, fmt='o', markersize=3, alpha=0.7)
             hlines += [
@@ -183,10 +192,7 @@ class lcurve_model_plot:
                 ax_res.axhline(2.5,  color='black', linestyle='--', alpha=0.3),
                 ax_res.axhline(-2.5, color='black', linestyle='--', alpha=0.3),
             ]
-            y_med = np.median(residuals_sigma)
-            y_mad = np.median(np.abs(residuals_sigma - y_med))
-            #ax_res.set_ylim(y_med - 8 * y_mad, y_med + 8 * y_mad)
-            ax_res.set_ylim(-5, 5)
+            ax_res.set_ylim(-4.5, 4.5)
             ax_res.set_ylabel(r"Residuals ($\sigma$)")
             if plot_idx < 2:
                 plt.setp(ax_res.get_xticklabels(), visible=False)
