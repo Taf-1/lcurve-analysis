@@ -96,22 +96,6 @@ class claret_tables_interp:
         logger.info(f"Interpolated to get the {coef} coefficients via the Claret 2-term law")
         return y1, y2
 
-    @staticmethod
-    def refit_4term(I_target: np.ndarray, mu: np.ndarray, logger=None) -> tuple[float, float, float, float]:
-        B  = np.column_stack([1.0 - mu**(k/2) for k in (1, 2, 3, 4)])
-        y  = 1.0 - I_target
-        a0, *_ = np.linalg.lstsq(B, y, rcond=None)
-
-        obj  = lambda a: float((B @ a - y) @ (B @ a - y))
-        cons = {"type": "ineq", "fun": lambda a: 1.0 - B @ a}
-        res  = minimize(obj, a0, constraints=cons, method="SLSQP")
-
-        if not res.success and logger is not None:
-            logger.warning(f"4-term LDC refit did not converge: {res.message}. "
-                        f"Using best-effort coefficients.")
-
-        return tuple(float(x) for x in res.x)
-
     def wd_limb_darkening(self) -> tuple[float, float, float, float]:
         filt_query = self.filt.replace("'", "")
         fname = f"./data/ld_coeffs/DA_LDCs_ucam_{filt_query}s.dat"

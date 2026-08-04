@@ -9,6 +9,7 @@ from lcurve_model_file import claret_tables_interp, effective_wavelength, adjust
 from plotting import lcurve_model_plot
 from astropy.time import Time
 from lcurve_rv_calc import xshooter_params
+import tqdm as tqdm
 
 BASELINE_GRID = {"nlat1f": 50, "nlat1c": 50, "nlat2f": 150, "nlat2c": 150}
 GRID_KEYS = ("nlat1f", "nlat1c", "nlat2f", "nlat2c")
@@ -22,6 +23,7 @@ def arg_parse() -> ap.Namespace:
     p.add_argument("t0",          help="t0 of binary system in BJD")
     p.add_argument("teff1",       help="Effective temperature of the WD")
     p.add_argument("logg1",       help="log g of the WD")
+    p.add_argument("logg1_err",   help="Error in log g of the WD")
     p.add_argument("wdtype",      help="WD type: DA or DB")
     p.add_argument("teff2",       help="Effective temperature of the companion")
     p.add_argument("logg2",       help="log g of the companion")
@@ -86,7 +88,7 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         ("r2", geom, 5),
         ("t1", geom, 5),
         ("t2", geom, 5),
-        ("absorb", "0.5", 2),
+        ("absorb", "0.5", 2), ("absorb", geom, 5),
         # WD limb darkening: set value and lock
         ("ldc1_1", f"{a1}", 2), ("ldc1_1", geom, 5),
         ("ldc1_2", f"{a2}", 2), ("ldc1_2", geom, 5),
@@ -193,15 +195,7 @@ def run_model(logger: logging.Logger, filename: str, band_index: int, t0: float,
     return ultracam_prelim, time, flux_norm, flux_err_norm, time_model, flux_model, t0_nearby, oot_norm_jy
 
 def jitter_grid_search(logger: logging.Logger, model_file: str, data_file: str,
-                       pathname: str, n_trials: int = 20, half_width: int = 50) -> dict:
-    """
-    Sample n_trials random grid combos (each nlat key = baseline ± half_width),
-    evaluate chi² against the data at fixed parameters, return the best combo.
-
-    Do NOT call this during simplex or MCMC — stochastic grid makes Nelder-Mead
-    contract around noise.  Call it once on the converged g-band model; the
-    returned grid is then used as a fixed setting for all subsequent band fits.
-    """
+                       pathname: str, n_trials: int = 20, half_width: int = 5) -> dict:
     flux_data = np.loadtxt(data_file, usecols=2)
     flux_err  = np.loadtxt(data_file, usecols=3)
 
@@ -242,6 +236,59 @@ def jitter_grid_search(logger: logging.Logger, model_file: str, data_file: str,
     logger.info(f"Best grid from jitter search: {best_grid} (chi2 = {best_chi2:.4f})")
     return best_grid
 
+def log_g_search(logger: logging.Logger, model_file: str, data_file: str, pathname: str, 
+        wd_temp: float, wd_logg: float, wd_logg_err: float, wd_type: str, comp_temp: float, 
+        comp_logg: float, filt: str, period: float, t0_nearby: float, rv_config: str, n_trials=1000) -> dict:
+    flux_data = np.loadtxt(data_file, usecols=2)
+    flux_err  = np.loadtxt(data_file, usecols=3)
+
+    best_chi2 = np.inf
+    best_logg = wd_logg
+
+    upper_limit = wd_logg + wd_logg_err
+    lower_limit = wd_logg - wd_logg_err
+
+    for i in range(n_trials):
+        new_logg = np.random.uniform(lower_limit, upper_limit)
+        claret = claret_tables_interp(logger, wd_temp, new_logg, wd_type, comp_temp, comp_logg, filt)
+        new_wd_ldc = claret.wd_limb_darkening()
+        comp_ldc = claret.comp_limb_darkening()
+        wd_gdc = claret.wd_gravity_darkening()
+        comp_gdc = claret.comp_gravity_darkening()
+
+        names = [f"ldc1_1", f"ldc1_2", f"ldc1_3", f"ldc1_4", f"ldc2_1", f"ldc2_2", f"ldc2_3", f"ldc2_4", "gravity_dark1", "gravity_dark2"]
+        values = [new_wd_ldc[0], new_wd_ldc[1], new_wd_ldc[2], new_wd_ldc[3], comp_ldc[0], comp_ldc[1], comp_ldc[2], comp_ldc[3], wd_gdc, comp_gdc]
+        indices = [2] * len(names)
+        ew = effective_wavelength(logger, 3)
+        wavelength = ew.pivot_wave()
+        i_band_config = change_params(
+                logger, model_file, pathname, period, t0_nearby, 3,
+                new_wd_ldc, comp_ldc, wd_gdc, comp_gdc, wavelength, "0", "0", rv_config, True,
+                grid_res=None
+            )
+        trial_model = f"{pathname}/logg_trial_{i}"
+        trial_out   = f"{pathname}/logg_out_{i}"
+        cfg_path = adjust_parameters( 
+            logger, i_band_config, trial_model, names, values, indices, set(names)
+        ).change_config()
+        lcurve(logger, cfg_path, data_file, trial_out).lroche()
+
+        flux_model = np.loadtxt(trial_out, usecols=2)
+        chi2 = float(np.sum(((flux_data - flux_model) / flux_err) ** 2))
+        logger.info(f"Log g trial {i+1}/{n_trials}: {new_logg} -> chi2 = {chi2:.4f}")
+
+        if chi2 < best_chi2:
+            best_chi2 = chi2
+            best_logg = new_logg
+
+    for i in range(n_trials):
+        for f in (f"{pathname}/logg_trial_{i}", f"{pathname}/logg_out_{i}"):
+            if os.path.exists(f):
+                os.remove(f)
+
+    logger.info(f"Best log g from search: {best_logg} (chi2 = {best_chi2:.4f})")
+    return best_logg
+
 
 def run(cfg: dict, logger: logging.Logger) -> None:
     data_root     = cfg['data_root']
@@ -251,6 +298,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     t0            = cfg['t0']
     wd_temp       = float(cfg['teff1'])
     wd_logg       = float(cfg['logg1'])
+    wd_logg_err   = float(cfg['logg1_err'])
     wd_type       = cfg['wdtype']
     comp_temp     = float(cfg['teff2'])
     comp_logg     = float(cfg['logg2'])
@@ -269,10 +317,10 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     band_order = [2, 1, 3]
     band_names = {1: "u'", 2: "g'", 3: "i'"}
 
-    def _run(band_idx, ref_model, start_model, grid):
+    def _run(band_idx, ref_model, start_model, grid, new_logg):
         return run_model(
             logger, filename, band_idx, t0, pathname, tar_name, period,
-            wd_temp, wd_logg, wd_type, comp_temp, comp_logg,
+            wd_temp, new_logg, wd_type, comp_temp, comp_logg,
             band_names[band_idx], ref_model, start_model, wd_model_path, comp_model_path, rv_config,
             grid_res=grid,
         )
@@ -280,18 +328,20 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     results = {}
     reference_model = None
     best_grid = None
+    best_logg = None
     for band_idx in band_order:
         model_file, time, flux_norm, flux_err_norm, time_model, flux_model, t0_nearby, oot_norm_jy = \
-            _run(band_idx, reference_model, example_model, best_grid)
+            _run(band_idx, reference_model, example_model, best_grid, new_logg=best_logg if best_logg is not None else wd_logg)
 
         if band_idx == 2:
             # search for best grid using the converged g-band result
-            data_file_g = f"{pathname}/{tar_name}_ultracam_data_file_2"
+            data_file_g = f"{pathname}/{tar_name}_ultracam_data_file_3"
+            best_logg = log_g_search(logger, model_file, data_file_g, pathname, wd_temp, wd_logg, wd_logg_err, wd_type, comp_temp, comp_logg, "i'", period, t0_nearby, rv_config)
+            logger.info(f"Re-running g-band simplex with best log g: {best_logg}")
             best_grid = jitter_grid_search(logger, model_file, data_file_g, pathname)
             logger.info(f"Re-running g-band simplex with best grid: {best_grid}")
-            # warm-start from the first g-band result so simplex is near the minimum
             model_file, time, flux_norm, flux_err_norm, time_model, flux_model, t0_nearby, oot_norm_jy = \
-                _run(band_idx, None, model_file, best_grid)
+                _run(band_idx, None, model_file, best_grid, best_logg)
             reference_model = model_file
             logger.info("Using g-band geometry (best grid) for subsequent fits")
 
@@ -304,9 +354,8 @@ def run(cfg: dict, logger: logging.Logger) -> None:
             't0_nearby':   t0_nearby,
             'oot_norm_jy': oot_norm_jy,
         }
-
+    logger.info(f"All bands processed using log g = {best_logg}. Generating plots...")
     lcurve_model_plot(logger, f"{pathname}/ultracam_model", results).lc_with_model(use_phase=False)
-
 
 if __name__ == "__main__":
     args     = arg_parse()
@@ -322,6 +371,7 @@ if __name__ == "__main__":
         't0':           args.t0,
         'teff1':        args.teff1,
         'logg1':        args.logg1,
+        'logg1_err':   args.logg1_err,
         'wdtype':       args.wdtype,
         'teff2':        args.teff2,
         'logg2':        args.logg2,
