@@ -5,6 +5,7 @@ import os
 from logger import sf_logging
 import desc
 import ephemeris
+import linear_ephem_approach
 import model
 
 def arg_parse() -> argparse.Namespace:
@@ -14,9 +15,9 @@ def arg_parse() -> argparse.Namespace:
     p.add_argument("config", help="Path to the pipeline configuration (.ini) file")
     p.add_argument(
         "--stages", nargs="+",
-        choices=["desc", "ephemeris", "model"],
-        default=["desc", "ephemeris", "model"],
-        help="Pipeline stages to run (default: all three)",
+        choices=["desc", "ephemeris", "linear_ephem", "model"],
+        default=["desc", "ephemeris", "linear_ephem", "model"],
+        help="Pipeline stages to run (default: all four)",
     )
     return p.parse_args()
 
@@ -59,9 +60,16 @@ if __name__ == "__main__":
         ephemeris.run(cfg, logger)
         logger.info("EPHEMERIS stage complete.")
 
+    if "linear_ephem" in args.stages:
+        logger.info("=" * 60)
+        logger.info("Stage 3 — LINEAR EPHEM: BLS + individual eclipse timing + linear ephemeris fit")
+        logger.info("=" * 60)
+        linear_ephem_approach.run(cfg, logger)
+        logger.info("LINEAR EPHEM stage complete.")
+
     if "model" in args.stages:
         logger.info("=" * 60)
-        logger.info("Stage 3 — MODEL: full MCMC light curve modelling")
+        logger.info("Stage 4 — MODEL: full MCMC light curve modelling")
         logger.info("=" * 60)
         model.run(cfg, logger)
         logger.info("MODEL stage complete.")

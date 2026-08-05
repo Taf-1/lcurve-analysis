@@ -16,6 +16,7 @@ from logger import sf_logging
 from lcurve_commands import lcurve
 from lcurve_data_files import create_data_file, save_data_file, adjust_data_file
 from lcurve_model_file import adjust_parameters
+import re
 
 def arg_parse() -> ap.Namespace:
     p = ap.ArgumentParser()
@@ -25,7 +26,7 @@ def arg_parse() -> ap.Namespace:
     p.add_argument("t0",        help="t0 of binary system (BJD TDB)")
     return p.parse_args()
 
-def load_model_params(logger: logging.Logger, config: str, tar: str, path: str) -> str:
+def load_model_params(logger: logging.Logger, config: str, tar: str, path: str, p_locked: float) -> str:
     new_config = f"{path}/{tar}_fix_ultracam_model_file"
     all_names = []
     with open(config, "r") as f:
@@ -33,10 +34,13 @@ def load_model_params(logger: logging.Logger, config: str, tar: str, path: str) 
             parts = line.split()
             if len(parts) >= 6 and parts[1] == "=":
                 all_names.append(parts[0])
+            elif len(parts) >= 3 and parts[1] == "=":
+                if parts[0] == "t_period":
+                    parts[2] = f"{p_locked:.15e}"
 
-    names   = all_names + ["period", "t0", "period", "t0", "period", "t0", "t0"]
-    values  = ["0"] * len(all_names) + ["1", "1", "0.0001", "0.0001", "0.0001", "0.0001", "0"]
-    indices = [5] * len(all_names) + [5, 5, 4, 4, 3, 3, 2]
+    names   = all_names + ["period", "t0", "period", "t0", "period", "t0", "t0", "period"]
+    values  = ["0"] * len(all_names) + ["1", "1", "0.0001", "0.0001", "0.001", "0.001", "0", f"{p_locked:.15e}"]
+    indices = [5] * len(all_names) + [5, 5, 4, 4, 3, 3, 2, 2]
 
     return adjust_parameters(
         logger, config, new_config, names, values, indices, set(names)
@@ -48,9 +52,9 @@ def log_prior(params: np.ndarray, names: list[str]) -> float:
 
     p = dict(zip(names, params))
 
-    if not (0.035 < p["period"] < 0.095):
+    if not (0.045 < p["period"] < 0.075):
         return -np.inf
-    if not (-1 < p["t0"] < 1):
+    if not (-5 < p["t0"] < 5):
         return -np.inf
 
     return 0.0
@@ -118,11 +122,18 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     data_root = cfg['data_root']
     filename  = cfg['ngts_dat']
     tar_name  = cfg['name']
-    t0_input  = cfg['t0']
     pathname  = f"{data_root}/{tar_name}"
 
     if not os.path.exists(pathname):
         os.makedirs(pathname)
+
+    with open(f"{pathname}/{tar_name}_ultracam_data_file_3") as f:
+        for line in f:
+            if "t0_nearby" in line:
+                match = re.search(r"t0_nearby\s*=\s*([0-9.eE+-]+)", line)
+                if match:
+                    ultracam_t0_nearby = float(match.group(1))
+                    break
 
     config = f"{pathname}/{tar_name}_ultracam_model_file_3"
     with open(config, "r") as f:
@@ -130,33 +141,37 @@ def run(cfg: dict, logger: logging.Logger) -> None:
             parts = line.split()
             if len(parts) >= 3 and parts[0] == "period" and parts[1] == "=":
                 period_val = float(parts[2])
-                break
+            elif len(parts) >= 3 and parts[0] == "t0" and parts[1] == "=":
+                t0_input = float(parts[2])
+    t0_input += ultracam_t0_nearby
     logger.info(f"Period from Ultracam model: {period_val:.10f} days")
+    logger.info(f"t0 from Ultracam model (relative): {t0_input:.10f} BMJD (TDB)")
 
-    time, cadence, flux, flux_err, t0_nearby = create_data_file(
-        logger, pathname, filename, 1, t0_input, period_val
+    t0_config = cfg['t0']  # JD — used to anchor t0_ngts_nearby on the eclipse sequence
+    logger.info(f"t0_config (JD): {t0_config}")
+
+    time, cadence, flux, flux_err, t0_nearby, n_cycles = create_data_file(
+        logger, pathname, filename, 3, t0_config, period_val
     ).extract_ngts_data()
 
-    time, flux, flux_err = adjust_data_file(time, flux, flux_err, 8).bin_data_on_time()
-    cadence *= 8
-    logger.info(f"Binned NGTS data by factor 8: {len(time)} points remaining")
+    # obtain p_locked - (t0_input - t0_nearby) / n_cycles
+    p_locked = np.abs((t0_input - t0_nearby) / n_cycles) #period_val
 
-    t_mid = 0.5 * (time.min() + time.max())
-    n_mid = round((t_mid - t0_nearby) / period_val)
-    t0_mid = t0_nearby + n_mid * period_val
-    logger.info(f"Recentred reference epoch: t0_nearby={t0_nearby:.10f} -> t0_mid={t0_mid:.10f} (cycle {n_mid})")
+    time, flux, flux_err = adjust_data_file(time, flux, flux_err, 10).bin_data_on_time()
+    cadence *= 10
+    logger.info(f"Binned NGTS data by factor 8: {len(time)} points remaining")
 
     output = f"{pathname}/{tar_name}_ngts_data_file"
     save_data_file(
-        logger, tar_name, 1, time,
-        np.full(len(time), cadence), flux, flux_err, t0_mid, output
+        logger, tar_name, 3, time,
+        np.full(len(time), cadence), flux, flux_err, t0_nearby, output
     ).write_data_file()
 
-    new_model = load_model_params(logger, config, tar_name, pathname)
-    logger.info(f"Initialised t0 = 0 in t0_mid frame (t0_mid={t0_mid:.10f})")
+    ngts_prelim = load_model_params(logger, config, tar_name, pathname, float(p_locked))
+    logger.info(f"Initialised t0 = 0 in t0_mid frame")
 
-    ngts_prelim = f"{pathname}/{tar_name}_ngts_model_file"
-    lcurve(logger, new_model, output, ngts_prelim).simplex()
+    #ngts_prelim = f"{pathname}/{tar_name}_ngts_model_file"
+    #lcurve(logger, new_model, output, ngts_prelim).simplex()
 
     names, p_best, steps = adjust_parameters(
         logger, ngts_prelim, ngts_prelim, [], [], [], {"period", "t0"}
@@ -166,7 +181,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     with open(ngts_prelim, "r") as f:
         base_lines = f.readlines()
 
-    mcmc_steps    = 20000
+    mcmc_steps    = 5000
     ndim          = len(p_best)
     nwalkers      = 4 * ndim
     initial_spread = 0.01 * steps
@@ -196,7 +211,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         logger.info(f"Saved: {pathname}/fix_walker_{names[i]}.png")
 
     """discard = int(input("\nEnter number of burn-in steps to discard: "))"""
-    discard = 5000
+    discard = 1000
 
     samples = sampler.get_chain(discard=discard, thin=15, flat=True)
     logger.info(f"Final samples: {samples.shape[0]} (discard={discard}, thin=15)")
@@ -219,7 +234,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     if "t0" in names:
         t0_idx = names.index("t0")
-        t0_abs = param_med[t0_idx] + t0_mid
+        t0_abs = param_med[t0_idx] + t0_nearby
         t0_abs_err = param_std[t0_idx]
         logger.info(f"Absolute t0 = {t0_abs:.10f} ± {t0_abs_err:.10f} BMJD (TDB)")
 
@@ -233,7 +248,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         fo.write("-" * 68 + "\n")
         for label, med, lo, hi in zip(names, medians, lowers, uppers):
             if label == "t0":
-                fo.write(f"{label:<30} {med + t0_mid:>12.10f} {lo:>12.10f} {hi:>12.10f}\n")
+                fo.write(f"{label:<30} {med + t0_nearby:>12.10f} {lo:>12.10f} {hi:>12.10f}\n")
             else:
                 fo.write(f"{label:<30} {med:>12.10f} {lo:>12.10f} {hi:>12.10f}\n")
     logger.info(f"Saved: {txt_file}")
@@ -252,9 +267,9 @@ def run(cfg: dict, logger: logging.Logger) -> None:
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(time_model, flux_model, 'r-', lw=2, label='Best-fit model', zorder=5)
-    ax.errorbar(time - t0_mid, flux, yerr=flux_err,
+    ax.errorbar(time - t0_nearby, flux, yerr=flux_err,
                 fmt='k.', ms=2, alpha=0.5, label='NGTS data', zorder=3)
-    ax.set_xlabel(f"Time from t0_mid = {t0_mid:.6f} (days)")
+    ax.set_xlabel(f"BMJD (TDB) - {int(t0_nearby)}")
     ax.set_ylabel("Normalized Flux")
     ax.legend()
     ax.grid(alpha=0.3)
