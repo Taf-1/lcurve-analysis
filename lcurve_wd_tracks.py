@@ -335,7 +335,7 @@ class WDTrackInterpolator:
             f"mass=[{masses.min():.3f}, {masses.max():.3f}] Msun, "
             f"Teff=[{teff_min:.0f}, {teff_max:.0f}] K")
 
-        kw = dict(method="linear", bounds_error=False, fill_value=None)
+        kw = dict(method="linear", bounds_error=False, fill_value=np.nan)
         axes = (masses, teff_grid)
         return (RegularGridInterpolator(axes, R_grid,    **kw),
                 RegularGridInterpolator(axes, logg_grid, **kw))
@@ -362,15 +362,15 @@ class WDTrackInterpolator:
 class CompTrackInterpolator:
     """Companion mass–radius prior from BHAC15 tracks.
 
-    Uses a 1D np.interp on mass at a fixed target logg slice (default 5.0).
-    LinearNDInterpolator (Qhull) deadlocks when called from forked worker
-    processes, so we precompute a plain numpy lookup table instead.
+    Builds a 2-D lookup: for each mass track, stores arrays of (Teff, R) so
+    that predict_radius(m2, teff) interpolates at the companion's observed Teff
+    rather than at a fixed logg slice.  Uses only numpy (no Qhull/scipy) to
+    remain fork-safe inside multiprocessing.Pool workers.
     """
 
     def __init__(self, logger: logging.Logger, track_file: str,
                  sigma_R_frac: float = 0.06,
-                 m_min: float = 0.010, m_max: float = 0.110,
-                 target_logg: float = 5.0) -> None:
+                 m_min: float = 0.010, m_max: float = 0.110) -> None:
         self.logger = logger
         self.sigma_R_frac = sigma_R_frac
         self.track_file = track_file
@@ -378,16 +378,22 @@ class CompTrackInterpolator:
         self.logger.info(f"Loading companion mass-radius tracks from {track_file}")
         baraffe = ascii.read(track_file)
         masses = np.unique(baraffe['M/Ms'])
-        m_arr, r_arr = [], []
+        self._mass = np.array([float(m) for m in masses])
+        self._teff_grids = []
+        self._r_grids = []
         for m in masses:
             rows = baraffe[baraffe['M/Ms'] == m]
-            idx = np.argmin(np.abs(np.array(rows['g']) - target_logg))
-            m_arr.append(float(m))
-            r_arr.append(float(rows['R/Rs'][idx]))
-        self._mass = np.array(m_arr)
-        self._radius = np.array(r_arr)
+            teff = np.array(rows['Teff'], dtype=float)
+            r    = np.array(rows['R/Rs'],  dtype=float)
+            order = np.argsort(teff)
+            self._teff_grids.append(teff[order])
+            self._r_grids.append(r[order])
 
-    def predict_radius(self, m2_msun: float, logg: float = 5.0) -> float:
+    def predict_radius(self, m2_msun: float, teff: float) -> float:
         if m2_msun < self._mass[0] or m2_msun > self._mass[-1]:
             return np.nan
-        return float(np.interp(m2_msun, self._mass, self._radius))
+        r_at_teff = np.array([
+            float(np.interp(teff, tg, rg))
+            for tg, rg in zip(self._teff_grids, self._r_grids)
+        ])
+        return float(np.interp(m2_msun, self._mass, r_at_teff))

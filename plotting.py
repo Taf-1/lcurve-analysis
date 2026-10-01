@@ -8,11 +8,11 @@ mpl.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
     "mathtext.fontset": "stix",
-    "font.size": 14,
-    "axes.labelsize": 14,
-    "axes.titlesize": 14,
-    "xtick.labelsize": 12,
-    "ytick.labelsize": 12,
+    "font.size": 35,
+    "axes.labelsize": 35,
+    "axes.titlesize": 35,
+    "xtick.labelsize": 30,
+    "ytick.labelsize": 30,
     "axes.linewidth": 1.2,
     "lines.linewidth": 1.5,
     "xtick.direction": "in",
@@ -142,7 +142,7 @@ class lcurve_model_plot:
 
     def lc_with_model(self, use_phase: bool = True,
                       oot_norms_jy: dict | None = None) -> None:
-        fig = plt.figure(figsize=(8, 12))
+        fig = plt.figure(figsize=(8, 16))
         gs = fig.add_gridspec(6, 1, height_ratios=[3, 1, 3, 1, 3, 1], hspace=0.05)
         plot_order = [1, 2, 3]
         band_colours = {1: 'blue', 2: 'green', 3: 'red'}
@@ -154,7 +154,6 @@ class lcurve_model_plot:
             res = self.results[band_idx]
             colour = band_colours[band_idx]
 
-            # mJy scaling: multiply normalised flux by OOT norm in mJy
             scale = (oot_norms_jy[band_idx] * 1e3
                      if (oot_norms_jy and band_idx in oot_norms_jy) else 1.0)
             y_data  = res['flux']       * scale
@@ -198,8 +197,8 @@ class lcurve_model_plot:
                 plt.setp(ax_res.get_xticklabels(), visible=False)
             else:
                 ax_res.set_xlabel(xlabel)
-        plt.savefig(f"{self.fig_name}.png", bbox_inches='tight', dpi=300)
-        plt.savefig(f"{self.fig_name}.pdf", bbox_inches='tight', dpi=300)
+        plt.savefig(f"{self.fig_name}.png", bbox_inches='tight', dpi=600)
+        plt.savefig(f"{self.fig_name}.pdf", bbox_inches='tight', dpi=600)
         self.logger.info(f"Saved: {self.fig_name}.png/.pdf")
         for line in model_lines + hlines:
             line.set_color('white')

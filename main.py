@@ -53,25 +53,25 @@ if __name__ == "__main__":
         desc.run(cfg, logger)
         logger.info("DESC stage complete.")
 
-    if "ephemeris" in args.stages:
-        logger.info("=" * 60)
-        logger.info("Stage 2 — EPHEMERIS: period and t0 from NGTS data")
-        logger.info("=" * 60)
-        ephemeris.run(cfg, logger)
-        logger.info("EPHEMERIS stage complete.")
-
     if "linear_ephem" in args.stages:
         logger.info("=" * 60)
-        logger.info("Stage 3 — LINEAR EPHEM: BLS + individual eclipse timing + linear ephemeris fit")
+        logger.info("Stage 2 — LINEAR EPHEM: BLS + individual eclipse timing + linear ephemeris fit")
         logger.info("=" * 60)
         linear_ephem_approach.run(cfg, logger)
         logger.info("LINEAR EPHEM stage complete.")
 
     if "model" in args.stages:
         logger.info("=" * 60)
-        logger.info("Stage 4 — MODEL: full MCMC light curve modelling")
+        logger.info("Stage 3 — MODEL: full MCMC light curve modelling")
         logger.info("=" * 60)
         model.run(cfg, logger)
         logger.info("MODEL stage complete.")
+
+    if "ephemeris" in args.stages:
+        logger.info("=" * 60)
+        logger.info("Stage 4 — EPHEMERIS: period and t0 from NGTS data")
+        logger.info("=" * 60)
+        ephemeris.run(cfg, logger)
+        logger.info("EPHEMERIS stage complete.")
 
     logger.info("Pipeline finished.")

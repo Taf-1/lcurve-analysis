@@ -17,23 +17,24 @@ from lcurve_commands import lcurve
 from lcurve_model_file import adjust_parameters
 from lcurve_stats import Jacobian, q_i_degeneracy, parabola
 from lcurve_rv_calc import xshooter_params
-from lcurve_wd_tracks import WDTrackInterpolator, CompTrackInterpolator
 from scipy.optimize import curve_fit
 from plotting import lcurve_model_plot, stats_plots
-from sed_prior import ClaretSEDInterp, compute_a_over_ebv, extract_wd_obs_flux, sed_log_prior_terms
 import plotting
 import matplotlib as mpl
-from astropy.io import fits as astrofits
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+from astroquery.vizier import Vizier
+
+#os.nice(19)
 
 mpl.rcParams.update({
     "font.family": "serif",
     "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
     "mathtext.fontset": "stix",
-    "font.size": 14,
-    "axes.labelsize": 14,
-    "axes.titlesize": 14,
-    "xtick.labelsize": 12,
-    "ytick.labelsize": 12,
+    "font.size": 20,
+    "axes.labelsize": 20,
+    "axes.titlesize": 20,
+    "xtick.labelsize": 18,
+    "ytick.labelsize": 18,
     "axes.linewidth": 1.2,
     "lines.linewidth": 1.5,
     "xtick.direction": "in",
@@ -122,7 +123,7 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
         vs_change = [("velocity_scale", cur_vs, 2)]
     changes = [
         ("period", "1", 2), ("period", "0", 5),
-        ("t0", t0_val, 2), ("t0", "0.005", 3), ("t0", "0", 5),
+        ("t0", t0_val, 2), ("t0", "0.001", 3), ("t0", "0", 5),
         ("q", "0", 5),
         *vs_change,
         ("velocity_scale", geom, 5),
@@ -136,7 +137,6 @@ def change_params(logger, config: str, path: str, band_idx: int, rv_config: str 
         ("t2",     geom, 5), 
         ("iscale", "0" if not fix_geometry else "1", 2),
     ]
-
     names   = [c[0] for c in changes]
     values  = [c[1] for c in changes]
     indices = [c[2] for c in changes]
@@ -193,30 +193,9 @@ def run_simplex_model(logger, filename: str, band_index: int, pathname: str, tar
     phase_model, flux_model, _      = np.loadtxt(model_dat, usecols=(0, 2, 3), unpack=True)
     return ultracam_prelim, phase, flux_norm, flux_err_norm, phase_model, flux_model
 
-def run_levmarq_model(logger, filename: str, band_index: int, pathname: str, tar_name: str, rv_config: str | None, reference_model: str | None = None) -> tuple[str, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if reference_model is None:
-        base_model = f"{pathname}/{tar_name}_model_simplex_model_2"
-        fix_geometry = False
-        logger.info("Fitting geometry + temperatures")
-    else:
-        base = f"{pathname}/{tar_name}_model_simplex_model_{band_index}"
-        base_model = adjusted_config(logger, base, reference_model, pathname, band_index, "levmarq")
-        fix_geometry = True
-        logger.info("Geometry fixed, fitting only temperatures")
-
-    model_config = change_params(logger, base_model, pathname, band_index, rv_config, "levmarq", fix_geometry)
-
-    ultracam_prelim = f"{pathname}/{tar_name}_model_levmarq_model_{band_index}"
-    lcurve(logger, model_config, filename, ultracam_prelim).levmarq()
-
-    model_dat = f"{pathname}/levmarq_model_dat_{band_index}"
-    lcurve(logger, ultracam_prelim, filename, model_dat).lroche()
-
-    phase, flux_norm, flux_err_norm = np.loadtxt(filename, usecols=(0, 2, 3), unpack=True)
-    phase_model, flux_model, _      = np.loadtxt(model_dat, usecols=(0, 2, 3), unpack=True)
-    return ultracam_prelim, phase, flux_norm, flux_err_norm, phase_model, flux_model
-
 def eggleton_rl(q: float) -> float:
+    if q <= 0:
+        return np.nan
     q23 = q ** (2.0 / 3.0)
     return 0.49 * q23 / (0.6 * q23 + np.log(1.0 + q ** (1.0 / 3.0)))
 
@@ -227,36 +206,112 @@ def split_normal_logpdf(x, mu, sig_lo, sig_hi):
         sig = sig_hi
     return -0.5 * ((x - mu) / sig) ** 2
 
+def _decode_geometry(p: dict) -> dict:
+    if "cos_i" not in p:
+        return p
+    cos_i = p.pop("cos_i")
+    b2 = cos_i ** 2
+    if "w" in p:
+        w = p.pop("w")
+        z = p.pop("z")
+        if w <= 0.0 or z <= 0.0 or z >= w:
+            raise ValueError(f"invalid: cos_i={cos_i}, w={w}, z={z}")
+        r_sum  = np.sqrt(w + b2)
+        r_diff = np.sqrt(z + b2)
+    else:
+        r_sum  = p.pop("r_sum")
+        r_diff = p.pop("r_diff")
+        if r_sum <= 0.0 or r_diff <= 0.0 or r_diff >= r_sum:
+            raise ValueError(f"invalid: cos_i={cos_i}, r_sum={r_sum}, r_diff={r_diff}")
+    if not (0.0 < cos_i < 1.0):
+        raise ValueError(f"invalid: cos_i={cos_i}")
+    p["iangle"] = np.degrees(np.arccos(cos_i))
+    p["r1"]     = (r_sum - r_diff) / 2.0
+    p["r2"]     = (r_sum + r_diff) / 2.0
+    return p
+
+def query_vizier(vizier_catalogue: str) -> Table:
+    Vizier.ROW_LIMIT = 30000
+    cat = Vizier.get_catalogs(vizier_catalogue)
+    return cat[0]
+
+def interp_param(col, filt_data, points, query):
+    values = np.array(filt_data[col], dtype=float)
+    val = LinearNDInterpolator(points, values)(query)[0]
+    if np.isnan(val):
+        val = NearestNDInterpolator(points, values)(query)[0]
+    return float(val)
+
+def itp(filt_data, logg, temp):
+    points = np.column_stack([np.array(filt_data['logg']), np.array(filt_data['Teff'])])
+    query  = np.array([[logg, temp]])
+    return interp_param('u', filt_data, points, query)
+
+def comp_linear_ldc(logg: float, temp: float, filt: str) -> tuple[float, float, float, float]:
+    data = query_vizier("J/A+A/546/A14/limb1-4")
+    mask = (data["Filt"] == filt) & (data["Mod"] == 'qs') & (data['Met'] == 'L')
+    filt_data = data[mask]
+    u_ms = itp(filt_data, logg, temp)
+    return u_ms
+
+def ellips_modu_coeff(flux_model: np.ndarray, flux: np.ndarray, flux_err: np.ndarray, config: str, logg: float, temp: float, filt: str) -> float:
+    f_ratio = (np.max(flux_model) - 1) / 1
+    max_idx = np.argmax(flux_model)
+    max_flux = flux[max_idx]
+    max_flux_err = flux_err[max_idx]
+    u_ms = comp_linear_ldc(logg, temp, filt)
+    with open(config, "r") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 4 and parts[1] == "=":
+                if parts[0] == "gravity_dark2":
+                    b_ms = float(parts[2])
+                    break
+    return f_ratio, max_flux_err, u_ms, b_ms
+
 def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
               period: float, wd_logg: float | None, wd_logg_err: float | None,
               logger: logging.Logger,
-              wd_interp: "WDTrackInterpolator | None" = None,
-              comp_interp: "CompTrackInterpolator | None" = None,
               spec_priors: dict | None = None,
               roche_fill_max: float = 1.0,
-              sed_data: dict | None = None) -> float:
+              K_total: float = 0.0, f_ratio_obs=None, f_ratio_err=None, u_ms=None, b_ms=None) -> float:
     if params is None or not np.all(np.isfinite(params)):
         return -np.inf
 
     p = dict(zip(names, params))
-
-    if not (79 < p["iangle"] < 89.99):      return -np.inf
-    if not (0.01 < p["r1"]  < 0.036):   return -np.inf
-    if not (0.2  < p["r2"]  < 0.385):    return -np.inf
-    if not (9000  < p["t1"]  < 18000):   return -np.inf
-    if not (2000  < p["t2"]  < 4000):    return -np.inf
-    if "ebv" in p and "parallax" in p:
-        if not (0.0 <= p["ebv"] < 0.1):      return -np.inf   
-        if not (0.0 < p["parallax"] < 50.0): return -np.inf    
-
-    if "q" in p and p["q"] > 0:
-        r_lobe = eggleton_rl(p["q"])
-        if p["r2"] > roche_fill_max * r_lobe:
-            return -np.inf
-    else:
+    try:
+        _decode_geometry(p)
+    except ValueError:
         return -np.inf
 
     lp = 0.0
+
+    if not (78 < p["iangle"] < 90):      return -np.inf
+    if not (0.001 < p["r1"]  < 0.05):    return -np.inf
+    if not (0.01 < p["r2"]  < 0.5):   return -np.inf
+    if not (9800  < p["t1"]  < 12750):   return -np.inf
+    if not (2000  < p["t2"]  < 3000):    return -np.inf
+    if "q" not in p or p["q"] <= 0:
+        return -np.inf
+
+    if not {"q", "iangle", "r1", "t1"}.issubset(p):
+        return lp
+    if K_total <= 0.0:
+        return lp
+
+    # --- RV constraints ---
+    if rv_config is not None:
+        xs     = xshooter_params(logger, rv_config, p["iangle"])
+        rvs    = xs.load_rv_parameters()
+        Kscale = K_total / (1.0 + p["q"])
+        vs  = K_total / np.sin(np.radians(p["iangle"]))
+        P_s = (period * u.day).to(u.s)
+        a_m = (vs * 1e3 * P_s.value / (2.0 * np.pi)) * u.m
+        a_med  = np.median(a_m.value)
+        a_rsun = (a_med * u.m).to(u.R_sun).value
+        lp += -0.5 * ((Kscale - rvs["K2"][0]) / rvs["K2"][1]) ** 2
+        lp += -0.5 * ((Kscale * p["q"] - rvs["K1"][0]) / rvs["K1"][1]) ** 2
+        logger.debug(f"RV prior: Kscale = {Kscale:.3f}, K2_pred = {rvs['K2'][0]:.3f}, K1_pred = {rvs['K1'][0]:.3f}, lp_K={-0.5 * ((Kscale - rvs['K2'][0]) / rvs['K2'][1]) ** 2 + -0.5 * ((Kscale * p['q'] - rvs['K1'][0]) / rvs['K1'][1]) ** 2:.3f}, total={lp:.3f}")
 
     lp_tspec = 0.0
     lp_t1_spec = 0.0
@@ -276,84 +331,32 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
             lp_tspec += lp_t2_spec
         else:
             lp_t2_spec = 0.0
-    t1_val = p.get("t1", None)
-    t2_val = p.get("t2", None)
-    logger.debug(f"Spectroscopic temperature priors: t1={t1_val:3f}, t2={t2_val:.3f}, lp_t1_spec={lp_t1_spec:.3f}, lp_t2_spec={lp_t2_spec:.3f}, total={lp_tspec:.3f}")
+
+        if "r1" in spec_priors:
+            mu, sigma = spec_priors["r1"]
+            lp_tspec += -0.5 * ((p["r1"] - (mu/a_rsun)) / (sigma/a_rsun)) ** 2
+
+        if "r2" in spec_priors:
+            mu, sigma = spec_priors["r2"]
+            lp_tspec += -0.5 * ((p["r2"] - (mu/a_rsun)) / (sigma/a_rsun)) ** 2
+
     lp += lp_tspec
 
-    if not {"velocity_scale", "q", "iangle", "r1", "t1"}.issubset(p):
-        return lp
-
-    P_s    = period * 86400.0
-    sin_i  = np.sin(np.radians(p["iangle"]))
-    a_m    = p["velocity_scale"] * 1.0e3 * P_s / (2.0 * np.pi)
-    a_rsun = a_m / const.R_sun.value
-
-    M_tot_kg   = 4.0 * np.pi**2 * a_m**3 / (const.G.value * P_s**2)
-    M_tot_msun = M_tot_kg / const.M_sun.value
-    m1_msun    = M_tot_msun / (1.0 + p["q"])
-    if m1_msun <= 0:
-        return -np.inf
-
-    m1_kg    = m1_msun * const.M_sun.value
-    R1_m     = p["r1"] * a_m
-    g_si     = const.G.value * m1_kg / R1_m**2
-    logg_obs = np.log10(g_si * 100.0)   # cgs
-
-    # --- RV constraints ---
-    if rv_config is not None:
-        xs     = xshooter_params(logger, rv_config, p["iangle"])
-        rvs    = xs.load_rv_parameters()
-        """q_pred = rvs["K1"][0] / rvs["K2"][0]
-        q_pred_err = np.sqrt((rvs["K1"][1] / rvs["K1"][0])**2 + (rvs["K2"][1] / rvs["K2"][0]**2)**2) * q_pred
-        lp += -0.5 * ((p["q"] - q_pred) / q_pred_err) ** 2
-        logger.debug(f"RV prior: q_obs = {p['q']:.3f}, q_pred = {q_pred:.3f}, lp_q={-0.5 * ((p['q'] - q_pred) / q_pred_err) ** 2:.3f}, total={lp:.3f}")
-        """
-        Kscale = p["velocity_scale"] * sin_i / (1 + p["q"])
-        lp += -0.5 * ((Kscale - rvs["K2"][0]) / rvs["K2"][1]) ** 2
-        lp += -0.5 * ((Kscale * p["q"] - rvs["K1"][0]) / rvs["K1"][1]) ** 2
-        logger.debug(f"RV prior: Kscale = {Kscale:.3f}, K2_pred = {rvs['K2'][0]:.3f}, K1_pred = {rvs['K1'][0]:.3f}, lp_K={-0.5 * ((Kscale - rvs['K2'][0]) / rvs['K2'][1]) ** 2 + -0.5 * ((Kscale * p['q'] - rvs['K1'][0]) / rvs['K1'][1]) ** 2:.3f}, total={lp:.3f}")
-
-    # --- WD surface gravity prior ---
-    if wd_logg is not None and wd_logg_err is not None:
-        lp += -0.5 * ((logg_obs - wd_logg) / wd_logg_err) ** 2
-        lp_logg = -0.5 * ((logg_obs - wd_logg) / wd_logg_err) ** 2
-        logger.debug(f"WD logg prior: log g = {logg_obs:.3f}, lp_logg={lp_logg:.3f}, total={lp_logg:.3f}")
-
-    # --- WD mass-radius relation prior ---
-    if wd_interp is not None:
-        R1_obs  = p["r1"] * a_rsun
-        R1_pred = wd_interp.predict_radius(p["t1"], m1_msun)
-        if np.isfinite(R1_pred):
-            lp += -0.5 * ((R1_obs - R1_pred) / (wd_interp.sigma_R_frac * R1_pred)) ** 2
-            lp_mr = -0.5 * ((R1_obs - R1_pred) / (wd_interp.sigma_R_frac * R1_pred)) ** 2
-            logger.debug(f"WD M-R prior: rad1 = {R1_obs:.3f}, lp_mr={lp_mr:.3f}, total={lp_mr:.3f}")
-
-    # --- Companion mass-radius relation prior ---
-    if comp_interp is not None and "r2" in p:
-        m2_msun = p["q"] * m1_msun
-        R2_obs  = p["r2"] * a_rsun
-        R2_pred = comp_interp.predict_radius(m2_msun, logg=5.0)
-        if np.isfinite(R2_pred):
-            lp += -0.5 * ((R2_obs - R2_pred) / (comp_interp.sigma_R_frac * R2_pred)) ** 2
-            logger.debug(f"Companion M-R prior: rad2 = {R2_obs:.3f}, lp_comp_mr={-0.5 * ((R2_obs - R2_pred) / (comp_interp.sigma_R_frac * R2_pred)) ** 2:.3f}, total={lp:.3f}")
-
-    # --- SED + parallax + extinction prior ---
-    if sed_data is not None and "parallax" in p and "ebv" in p:
-        try:
-            sed_lp = sed_log_prior_terms(logger, p, a_m, logg_obs, sed_data)
-        except Exception as e:
-            logger.warning(f"SED prior raised {type(e).__name__}: {e}")
-            return -np.inf
-        if not np.isfinite(sed_lp):
-            return -np.inf
-        lp += sed_lp
-        logger.debug(f"SED prior: lp_sed={sed_lp:.3f}, total={lp:.3f}")
+    if f_ratio_obs is not None and f_ratio_err is not None:
+        a_coeff = (0.15 * (15.0 + u_ms) * (1.0 + b_ms)) / (3.0 - u_ms)
+        f_ratio_pred = a_coeff * (p["r2"]) ** 3 * (1 / p["q"]) * np.sin(np.radians(p["iangle"])) ** 2
+        lp += -0.5 * ((f_ratio_pred - f_ratio_obs) / f_ratio_err) ** 2 + np.log(2*np.pi*f_ratio_err**2)
 
     return lp
 
 def log_likelihood(params: np.ndarray, names: list[str], data_dir: str, rv_config: str | None, gaia_id: str, band_order: list[int], logger: logging.Logger) -> float:
-    p_dict   = dict(zip(names, params))
+    p_dict = dict(zip(names, params))
+    try:
+        _decode_geometry(p_dict)
+    except ValueError:
+        return -np.inf
+    decoded_names = list(p_dict.keys())
+    decoded_vals  = [p_dict[n] for n in decoded_names]
     total_ll = 0.0
     for band_idx in band_order:
         base      = f"{data_dir}/{gaia_id}_model_simplex_model_{band_idx}"
@@ -363,8 +366,8 @@ def log_likelihood(params: np.ndarray, names: list[str], data_dir: str, rv_confi
         mcmc_file = f"{data_dir}/w{walker_id}_mcmc_model"
         mcmc_dat  = f"{data_dir}/w{walker_id}_mcmc_dat"
 
-        param_names = list(names) + ["quad"]
-        param_vals  = [f"{v:.15e}" for v in params] + ["0"]
+        param_names = decoded_names + ["quad"]
+        param_vals  = [f"{v:.15e}" for v in decoded_vals] + ["0"]
         param_idx   = [2] * len(param_names)
         try:
             adjust_parameters(
@@ -402,16 +405,15 @@ def log_likelihood(params: np.ndarray, names: list[str], data_dir: str, rv_confi
             return -np.inf
         total_ll += -0.5 * chi2
         ll = -0.5 * chi2
-        #logger.info(f"Band {band_idx}: chi2={chi2:.3f}, ll={ll:.3f}, total_ll={total_ll:.3f}")
 
     return total_ll
 
 def log_probability(params, names, data_dir, rv_config, gaia_id, band_order,
                     a_r_sun, period, wd_logg, wd_logg_err, logger,
-                    wd_interp=None, comp_interp=None,
-                    spec_priors=None, roche_fill_max=1.0, sed_data=None):
+                    spec_priors=None, roche_fill_max=1.0,
+                    K_total=0.0, f_ratio=None, max_flux_err=None, u_ms=None, b_ms=None) -> float:
     lp = log_prior(params, names, rv_config, period, wd_logg, wd_logg_err, logger,
-                   wd_interp, comp_interp, spec_priors, roche_fill_max, sed_data)
+                   spec_priors, roche_fill_max, K_total, f_ratio, max_flux_err, u_ms, b_ms)
     if not np.isfinite(lp):
         return -np.inf
     return lp + log_likelihood(params, names, data_dir, rv_config,
@@ -430,7 +432,7 @@ def plot_ellipsoidal_signal(logger: logging.Logger, fig_name: str, results: dict
     phase_model = res['phase_model']
     ylabel      = "Normalized Flux" if norm is None else r"Flux (mJy)"
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 4),
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8),
                                    gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.0})
     ax1.plot(phase_model, flux_model, 'k-', lw=2, zorder=5, label='Model')
     ax1.errorbar(phase, flux, yerr=flux_err, fmt='o', color='red',
@@ -470,6 +472,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     a_r_sun   = float(cfg['a_r_sun'])
     wd_logg  = float(cfg['logg1'])
     wd_logg_err  = float(cfg['logg1_err'])
+    comp_logg = float(cfg.get('logg2', 5.0))
     spec_priors = {}
     if 't1_spec' in cfg:
         spec_priors['t1'] = (float(cfg['t1_spec']),
@@ -477,18 +480,14 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     if 't2_spec' in cfg:
         spec_priors['t2'] = (float(cfg['t2_spec']),
                              float(cfg['t2_low']), float(cfg['t2_up']))
+    if 'r1_spec' in cfg and 'r1_spec_err' in cfg:
+        spec_priors['r1'] = (float(cfg['r1_spec']),
+                             float(cfg['r1_spec_err']))
+    if 'r2_spec' in cfg and 'r2_spec_err' in cfg:
+        spec_priors['r2'] = (float(cfg['r2_spec']),
+                             float(cfg['r2_spec_err']))
     spec_priors = spec_priors or None
-    logger.info(f"Spectroscopic temperature priors: {spec_priors}")
-
-    comp_track_file = cfg.get('comp_tracks',
-                              f"{data_root}/data/cooling_tracks/Baraffe/baraffe.dat")
-    try:
-        comp_interp = CompTrackInterpolator(logger, comp_track_file,
-                                            sigma_R_frac=float(cfg.get('sigma_r2_frac', 0.06)))
-    except Exception as e:
-        logger.warning(f"Could not build companion track interpolator ({e}); "
-                       f"companion M–R prior disabled")
-        comp_interp = None
+    logger.info(f"Spectroscopic priors: {spec_priors}")
 
     data_dir  = f"{data_root}/{gaia_id}"
     if not os.path.exists(data_dir):
@@ -497,6 +496,13 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     rv_config = f"{data_root}/{gaia_id}_rv_config"
     if not os.path.exists(rv_config):
         rv_config = None
+
+    K_total = 0.0
+    if rv_config is not None:
+        _rvs    = xshooter_params(logger, rv_config).load_rv_parameters()
+        K_total = _rvs["K1"][0] + _rvs["K2"][0]
+        logger.info(f"RV: K1={_rvs['K1'][0]:.2f}, K2={_rvs['K2'][0]:.2f}, "
+                    f"K1+K2={K_total:.2f} km/s")
 
     eph_config = f"{data_dir}/ephemeris.txt"
     eph = {}
@@ -594,13 +600,6 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         ingr_mask = (((phase_bin >= phi1) & (phase_bin < phi2)) |
                     ((phase_bin > phi3) & (phase_bin <= phi4)))
         ie_mask   = (phase_bin >= phi2) & (phase_bin <= phi3)
-
-        # --- statistical weights: NATURAL inverse-variance weighting ---
-        # Every point contributes chi2 = weight * (resid/ferr)**2 with weight = 1,
-        # so the information balance between phase regions is set by the data,
-        # not imposed. Any per-region reweighting is equivalent to silently
-        # rescaling error bars and corrupts both chi2 and the parameter
-        # uncertainties derived from it.
         weights = np.ones(len(flux_bin))
 
         nsub = np.ones(len(phase_bin), dtype=int)
@@ -613,7 +612,6 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         logger.info(f"Band {band_idx}: nsub ingress={ns_ingr}"
                     + ("" if partial else f" in-eclipse={ns_ie}"))
 
-        # lcurve data file: time, exposure, flux, ferr, weight, nsub
         out = np.column_stack([
             phase_bin,
             exposure,
@@ -670,143 +668,102 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     lcurve_model_plot(logger, f"{data_dir}/{gaia_id}_model_simplex", results_simplex).lc_with_model(use_phase=True)
     plot_ellipsoidal_signal(logger, f"{data_dir}/{gaia_id}_ellipsoidal_simplex", results_simplex)
 
+    mcmc_allowed = {"q", "iangle", "r1", "r2", "t1", "t2"}
+    with open(reference_model_simplex, "r") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 6 and parts[1] == "=":
+                if parts[0] == "t2":
+                    t2_ref = float(parts[2])
+                    break
+    f_ratio, max_flux_err, u_ms, b_ms = ellips_modu_coeff(results_simplex[3]['flux_model'], results_simplex[3]["flux"], results_simplex[3]['flux_err'], reference_model_simplex, comp_logg, t2_ref, "i'")
+
     results = {}
     for band_idx in band_order:
         con_lev    = f"{data_dir}/{gaia_id}_model_simplex_model_{band_idx}"
         new_config = vary_mass_ratio(logger, con_lev, data_dir, band_idx)
         names, p_best, steps = adjust_parameters(
-            logger, new_config, new_config, [], [], [], {"q", "iangle", "r1", "r2", "t1", "t2", "velocity_scale"}
+            logger, new_config, new_config, [], [], [], mcmc_allowed
         ).load_mcmc_params()
         results[band_idx] = {"names": names, "p_best": p_best, "steps": steps}
 
     os.chdir(data_dir)
 
-    spec_type  = cfg.get('wdtype', 'DA')
-    sigma_r_wd = float(cfg.get('sigma_r_wd', 0.05))
-    logg1_ref  = float(cfg['logg1'])      if 'logg1'     in cfg else None
-    logg1_err  = float(cfg['logg1_err'])  if 'logg1_err' in cfg else None
-    try:
-        wd_interp = WDTrackInterpolator(logger, spec_type=spec_type, sigma_R=sigma_r_wd,
-                                        logg1_ref=logg1_ref, logg1_err=logg1_err)
-        logger.info(f"WD track prior enabled: sigma_R_frac={wd_interp.sigma_R_frac:.1%}, "
-                    f"logg1={logg1_ref}±{logg1_err}")
-    except Exception as e:
-        logger.warning(f"Could not build WD track interpolator ({e}); track priors disabled")
-        wd_interp = None
-
-    # --- SED + parallax + extinction setup ---
-    fits_path    = cfg['ultracam_dat']
-    gaia_plx     = float(cfg.get('gaia_parallax',     0.0))
-    gaia_plx_err = float(cfg.get('gaia_parallax_err', 1.0))
-    ebv_map      = float(cfg.get('ebv',     0.0))
-    ebv_err      = float(cfg.get('ebv_err', 0.01))
-    sed_data     = None
-    oot_norms_jy = {}   # {band_idx: OOT flux in Jy}  — used for mJy plots
-
-    t0_for_sed = eph.get('T0_BMJD_TDB', float(cfg.get('t0', 0.0)))
-    try:
-        wd_flux_raw = extract_wd_obs_flux(fits_path, t0_for_sed, period)
-        oot_norms_jy = {bi: wd_flux_raw[bi][2] for bi in band_order}
-        logger.info(f"OOT norms (mJy): " +
-                    ", ".join(f"band{bi}={v*1e3:.3f}" for bi, v in oot_norms_jy.items()))
-    except Exception as e:
-        logger.warning(f"Could not read OOT norms for mJy plots: {e}")
-
-    if gaia_plx > 0:
-        try:
-            logger.info("Building Claret SED interpolator (queries Vizier) ...")
-            claret_sed   = ClaretSEDInterp(logger, wdtype=cfg.get('wdtype', 'DA'))
-            A_over_EBV   = {bi: compute_a_over_ebv(bi, T_source=float(cfg.get('teff1', 10500.0)))
-                            for bi in band_order}
-            for bi in band_order:
-                fw, fe, _ = wd_flux_raw[bi]
-                logger.info(f"Band {bi}: WD depth = {fw*1e3:.4f} ± {fe*1e3:.4f} mJy  "
-                            f"A/E(B-V) = {A_over_EBV[bi]:.3f}")
-            ldc_per_band = {}
-            for bi in band_order:
-                # try claret limb darkening - switch to new model file bad corner
-                mf = f"{data_dir}/ultracam_model_file_{bi}"
-                try:
-                    a1 = float(read_param(mf, "ldc1_1"))
-                    a2 = float(read_param(mf, "ldc1_2"))
-                    a3 = float(read_param(mf, "ldc1_3"))
-                    a4 = float(read_param(mf, "ldc1_4"))
-                    ldc_per_band[bi] = (a1, a2, a3, a4)
-                    logger.info(f"Band {bi} LDC from model file: "
-                                f"a1={a1:.4f} a2={a2:.4f} a3={a3:.4f} a4={a4:.4f}")
-                except (KeyError, FileNotFoundError, OSError) as exc:
-                    logger.warning(f"Could not read LDC for band {bi} from {mf}: {exc}")
-            sed_data = {
-                'claret_interp': claret_sed,
-                'F_WD_OBS':      {bi: wd_flux_raw[bi][0] for bi in band_order},
-                'F_WD_OBS_ERR':  {bi: wd_flux_raw[bi][1] for bi in band_order},
-                'A_OVER_EBV':    A_over_EBV,
-                'band_order':    band_order,
-                'gaia_plx':      gaia_plx,
-                'gaia_plx_err':  gaia_plx_err,
-                'ebv_map':       ebv_map,
-                'ebv_err':       max(ebv_err, 1e-4),
-                'ldc_per_band':  ldc_per_band,
-            }
-            logger.info(f"SED prior enabled: plx={gaia_plx}±{gaia_plx_err} mas, "
-                        f"E(B-V)={ebv_map}±{ebv_err}")
-        except Exception as e:
-            logger.warning(f"SED prior disabled: {e}")
-            sed_data = None
-    else:
-        logger.info("gaia_parallax not set in config; SED prior disabled")
-
     names   = list(results[2]["names"])
     p_best  = results[2]["p_best"].copy()
 
-    if sed_data is not None:
-        names  = names + ["parallax", "ebv"]
-        p_best = np.append(p_best, [gaia_plx, ebv_map])
+    if "iangle" in names:
+        i_idx   = names.index("iangle")
+        r1_idx  = names.index("r1")
+        r2_idx  = names.index("r2")
+        iangle0 = p_best[i_idx]
+        r1_0    = p_best[r1_idx]
+        r2_0    = p_best[r2_idx]
+        cos_i0  = np.cos(np.radians(iangle0))
+        b0      = cos_i0
+        r_sum0  = r1_0 + r2_0
+        r_diff0 = r2_0 - r1_0
+        w0      = r_sum0**2 - b0**2
+        z0      = r_diff0**2 - b0**2
+        names[i_idx]   = "cos_i"; p_best[i_idx]  = cos_i0
+        names[r1_idx]  = "w";     p_best[r1_idx] = w0
+        names[r2_idx]  = "z";     p_best[r2_idx] = z0
+        logger.info(f"Geometry reparametrisation: cos_i={cos_i0:.6f}, "
+                    f"w={w0:.6f}, z={z0:.6f} "
+                    f"(r_sum={r_sum0:.6f}, r_diff={r_diff0:.6f})")
 
     logger.info(f"MCMC parameter names: {names}")
-    ndim        = len(p_best)
-    mcmc_steps  = 1000
-    steps_mcmc = 0.01 * np.abs(p_best)
-    abs_floor  = np.full(ndim, 1e-6)
-    for k, nm in enumerate(names):
-        if nm == "t1":       abs_floor[k] = 20.0
-        if nm == "t2":       abs_floor[k] = 10.0
-        if nm == "parallax": abs_floor[k] = gaia_plx_err
-        if nm == "ebv":      abs_floor[k] = max(ebv_err, 1e-4)
-    steps_mcmc = np.maximum(steps_mcmc, abs_floor)
+    ndim       = len(p_best)
+    steps_mcmc = 0.001 * np.abs(p_best)
+    if "cos_i" in names:
+        steps_mcmc[i_idx] = np.sin(np.radians(iangle0)) * np.radians(0.01)
 
-    FIXED_ABS_STEP = {"iangle": 0.03, "r1": 3e-4, "r2": 1.5e-4}
-    for k, nm in enumerate(names):
-        if nm in FIXED_ABS_STEP:
-            steps_mcmc[k] = FIXED_ABS_STEP[nm]
+    nwalkers   = 4 * ndim
+    mcmc_steps = 5000
+    rng = np.random.default_rng()
+    p0 = p_best + steps_mcmc * rng.standard_normal((nwalkers, ndim))
 
-    nwalkers = max(4 * ndim, 32)
-    rng      = np.random.default_rng()
-    p0       = p_best + steps_mcmc * rng.standard_normal((nwalkers, ndim))
+    if "cos_i" in names:
+ 
+        sigma_i_deg = 0.01
+        sigma_r1    = 1e-4
+        sigma_r2    = 1e-3
 
-    if "iangle" in names:
-        i_idx = names.index("iangle")
-        p0[:, i_idx] = np.clip(p0[:, i_idx], None, 89.99)
+        i_p0  = np.clip(iangle0 + sigma_i_deg * rng.standard_normal(nwalkers), 82.0, 90)
+        r2_p0 = r2_0 + sigma_r2 * rng.standard_normal(nwalkers)
+        r1_p0 = r1_0 + sigma_r1 * rng.standard_normal(nwalkers)
 
-    logger.info(f"Walker init steps: { {nm: f'{steps_mcmc[k]:.4g}' for k, nm in enumerate(names)} }")
+        cos_i_p0  = np.cos(np.radians(i_p0))
+        r_sum_p0  = r1_p0 + r2_p0
+        r_diff_p0 = r2_p0 - r1_p0
+        p0[:, i_idx]  = cos_i_p0
+        p0[:, r1_idx] = np.maximum(r_sum_p0**2 - cos_i_p0**2, 1e-8)
+        p0[:, r2_idx] = np.maximum(r_diff_p0**2 - cos_i_p0**2, 1e-8)
+        logger.info(f"  p0 geometry: iangle={iangle0:.3f}°±{sigma_i_deg:.3f}°, "
+                    f"r1={r1_0:.5f}±{sigma_r1:.5f}, r2={r2_0:.5f}±{sigma_r2:.5f}")
+
+    logger.info(f"Walker init spread: { {nm: f'{steps_mcmc[k]:.4g}' for k, nm in enumerate(names)} }")
     logger.info(f"Running MCMC with {nwalkers} walkers, {ndim} parameters, {mcmc_steps} steps")
 
     moves = [
-        (emcee.moves.StretchMove(), 0.8),
-        (emcee.moves.DEMove(), 0.2),
-    ]
+            (emcee.moves.DEMove(),        0.8),
+            (emcee.moves.DESnookerMove(), 0.2),
+        ]
 
-    with Pool(processes=32) as pool:
+    with Pool(processes=24) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_probability,
             args=(names, data_dir, rv_config, gaia_id, band_order, a_r_sun, period,
-                wd_logg, wd_logg_err, logger, wd_interp, comp_interp,
-                spec_priors, 1.0, sed_data),
+                wd_logg, wd_logg_err, logger, spec_priors, 1.0, K_total, f_ratio, max_flux_err, u_ms, b_ms),
             pool=pool,
             moves=moves
         )
         logger.info("Starting MCMC sampling...")
         sampler.run_mcmc(p0, mcmc_steps, progress=True)
+
+    acc = sampler.acceptance_fraction
+    logger.info(f"Acceptance fraction: mean={acc.mean():.3f}, "
+                f"min={acc.min():.3f}, max={acc.max():.3f}")
 
     chain = sampler.get_chain()
     nsteps, nwalkers_out, ndim_out = chain.shape
@@ -824,24 +781,87 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         plt.close(fig)
         logger.info(f"Saved: {data_dir}/{mcmc_steps}_{names[i]}_walker_traj.png")
 
-    tau     = sampler.get_autocorr_time(tol=0)
+    discard = 1000
+    tau = sampler.get_autocorr_time(discard=discard, tol=50, quiet=True)
     logger.info(f"Autocorrelation time: {tau}")
-    discard = int(3 * np.nanmax(tau))
-    thin    = max(1, int(0.5 * np.nanmin(tau)))
+    #discard = min(int(5 * np.nanmax(tau)), max(0, mcmc_steps - 50))
+    thin    = max(1, int(0.5 * np.nanmax(tau))) if np.any(np.isfinite(tau)) else 1
+    if thin > (mcmc_steps - discard):
+        thin = 1
+        logger.info("Short run: thinning disabled — using all post-discard samples")
 
-    log_prob_chain = sampler.get_log_prob()           # (nsteps, nwalkers)
+    log_prob_chain = sampler.get_log_prob()
     mean_lp = np.mean(log_prob_chain[discard:], axis=0)
     lp_med  = np.median(mean_lp)
     lp_mad  = np.median(np.abs(mean_lp - lp_med))
-    good_walkers = mean_lp > lp_med - 5 * lp_mad
-    n_bad = (~good_walkers).sum()
-    logger.info(f"Walker sigma-clip: removing {n_bad}/{nwalkers_out} outlier walkers "
-                f"(threshold={lp_med - 5*lp_mad:.1f}, median={lp_med:.1f})")
+    good_lp = mean_lp > lp_med - 5 * lp_mad
+
+    # Movement-based walker diagnostics (thin=1 to catch every step).
+    # A walker that is truly frozen shows zero coordinate changes even if emcee
+    # reports a non-zero acceptance fraction (e.g. proposals accepted but all
+    # identical due to prior boundary clamping).
+    post_raw = sampler.get_chain(discard=discard, thin=1)   # (nsteps, nwalkers, ndim)
+    lp_raw   = sampler.get_log_prob(discard=discard, thin=1)
+    moved    = np.any(post_raw[1:] != post_raw[:-1], axis=2)  # (nsteps-1, nwalkers)
+
+    move_frac     = moved.mean(axis=0)
+    longest_stall = np.array([
+        np.max(np.diff(np.flatnonzero(np.r_[True, moved[:, j], True])) - 1)
+        for j in range(post_raw.shape[1])
+    ])
+    finite_logp = np.array([np.all(np.isfinite(lp_raw[:, j])) for j in range(post_raw.shape[1])])
+
+    logger.info("Walker diagnostics (post-discard, thin=1):")
+    logger.info(f"{'walker':>6}  {'moves':>5}  {'move_frac':>9}  {'longest_stall':>13}  {'finite_logp':>11}")
+    for j in range(post_raw.shape[1]):
+        logger.info(
+            f"{j:6d}  {int(moved[:, j].sum()):5d}  "
+            f"{move_frac[j]:9.3f}  "
+            f"{int(longest_stall[j]):13d}  "
+            f"{str(finite_logp[j]):>11}"
+        )
+
+    # Three-way filter: log-prob outlier, acceptance fraction, actual movement.
+    acc_threshold  = 0.10
+    move_threshold = 0.05   # walker must move on >= 5% of post-discard steps
+    good_acc  = acc >= acc_threshold
+    good_move = move_frac >= move_threshold
+    good_walkers = good_lp & good_acc & good_move
+    n_bad_lp   = (~good_lp).sum()
+    n_bad_acc  = (~good_acc).sum()
+    n_bad_move = (~good_move).sum()
+    n_bad      = (~good_walkers).sum()
+    logger.info(
+        f"Walker filter: removed {n_bad}/{nwalkers_out} walkers "
+        f"({n_bad_lp} log-prob outliers, {n_bad_acc} frozen acc<{acc_threshold:.0%}, "
+        f"{n_bad_move} frozen move<{move_threshold:.0%}); "
+        f"acc range [{acc.min():.3f}, {acc.max():.3f}], "
+        f"move_frac range [{move_frac.min():.3f}, {move_frac.max():.3f}]"
+    )
 
     logger.info(f"Discarding {discard} burn-in steps, thinning by {thin}")
 
-    full_chain = sampler.get_chain(discard=discard, thin=thin)   # (steps, walkers, ndim)
+    full_chain = sampler.get_chain(discard=discard, thin=thin)
     samples    = full_chain[:, good_walkers, :].reshape(-1, ndim_out)
+
+    if "cos_i" in names:
+        cos_i_s = samples[:, i_idx].copy()
+        b2_s    = cos_i_s ** 2
+        if "w" in names:
+            w_s      = samples[:, r1_idx].copy()
+            z_s      = samples[:, r2_idx].copy()
+            r_sum_s  = np.sqrt(np.maximum(w_s + b2_s, 0.0))
+            r_diff_s = np.sqrt(np.maximum(z_s + b2_s, 0.0))
+        else:
+            r_sum_s  = samples[:, r1_idx].copy()
+            r_diff_s = samples[:, r2_idx].copy()
+        samples[:, i_idx]  = np.degrees(np.arccos(np.clip(cos_i_s, -1.0, 1.0)))
+        samples[:, r1_idx] = (r_sum_s - r_diff_s) / 2.0
+        samples[:, r2_idx] = (r_sum_s + r_diff_s) / 2.0
+        names[i_idx]  = "iangle"
+        names[r1_idx] = "r1"
+        names[r2_idx] = "r2"
+
     param_med = np.median(samples, axis=0)
 
     if "t0" in names:
@@ -852,12 +872,19 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         logger.info(f"{name} = {med:.6f}")
 
     q_samples  = samples[:, names.index("q")]
-    vs_samples = samples[:, names.index("velocity_scale")]
     P_s = (period * u.day).to(u.s)
+    if rv_config is not None:
+        rvs_post       = xshooter_params(logger, rv_config).load_rv_parameters()
+        K_total        = rvs_post["K1"][0] + rvs_post["K2"][0]
+        iangle_samples = samples[:, names.index("iangle")]
+        vs_samples     = K_total / np.sin(np.radians(iangle_samples))
+        logger.info(f"Post-MCMC mass: (K1+K2)={K_total:.2f} km/s / sin(i) per sample")
+    else:
+        vs_geom    = 2.0 * np.pi * a_r_sun * const.R_sun.value / (period * 86400.0) / 1.0e3
+        vs_samples = np.full(len(samples), vs_geom)
+        logger.info(f"Post-MCMC mass: no rv_config, using geometric velocity_scale={vs_geom:.4f} km/s")
     a_m = (vs_samples * 1e3 * P_s.value / (2.0 * np.pi)) * u.m
-
-    a_med = np.median(a_m.value)
-
+    a_med  = np.median(a_m.value)
     a_rsun = (a_med * u.m).to(u.R_sun).value
     m_total_kg = ((4 * np.pi**2 * a_m**3) / (const.G * P_s**2)).value
     m_total_msun = m_total_kg / const.M_sun.value
@@ -865,32 +892,29 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     m2_samples = q_samples * m1_samples
 
     _CORNER_LABEL = {
-        "iangle":         r"$i\ [^\circ]$",
-        "r1":             r"$r_1/a$",
-        "r2":             r"$r_2/a$",
-        "t1":             r"$T_1\ [K]$",
-        "t2":             r"$T_2\ [K]$",
-        "velocity_scale": r"$V_{\rm s}\ [\rm km\,s^{-1}]$",
-        "parallax":       r"$\varpi\ [\rm mas]$",
-        "ebv":            r"$E(B-V)$",
+        "iangle":          r"$i\ [^\circ]$",
+        "r1":              r"$r_1/a$",
+        "r2":              r"$r_2/a$",
+        "t1":              r"$T_1\ [K]$",
+        "t2":              r"$T_2\ [K]$",
     }
-    # Drop q; keep everything else (incl. parallax/ebv if present)
-    keep_cols        = [i for i, n in enumerate(names) if n != "q"]
-    phys_names       = [names[i] for i in keep_cols]
+    keep_cols        = [j for j, n in enumerate(names) if n != "q"]
+    corner_names     = [names[j] for j in keep_cols]
     samples_phys     = samples[:, keep_cols]
     samples_extended = np.hstack([m1_samples[:, None], m2_samples[:, None], samples_phys])
     corner_labels    = (
         [r'$M_{\rm WD}\ [M_\odot]$', r'$M_{\rm comp}\ [M_\odot]$']
-        + [_CORNER_LABEL.get(n, n) for n in phys_names]
+        + [_CORNER_LABEL.get(n, n) for n in corner_names]
     )
     param_med_corner = np.median(samples_extended, axis=0)
     cornerfig = corner.corner(
         samples_extended, labels=corner_labels, truths=param_med_corner,
-        show_titles=True, title_fmt=".2f",
-        label_kwargs={"fontsize": 13}, title_kwargs={"fontsize": 13},
+        show_titles=False, title_fmt=".2f",
+        label_kwargs={"fontsize": 40}, title_kwargs={"fontsize":40},
+        fig=plt.figure(figsize=(40, 40))
     )
     for ax in cornerfig.get_axes():
-        ax.tick_params(labelsize=13)
+        ax.tick_params(labelsize=35)
     cornerfig.savefig(f"{data_dir}/model_corner_plot.png", dpi=300)
     cornerfig.savefig(f"{data_dir}/model_corner_plot.pdf", dpi=300)
     logger.info(f"Saved: {data_dir}/model_corner_plot.png/.pdf")
@@ -920,8 +944,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     with open(txt_file, "w") as of:
         of.write(f"{'Parameter':<30} {'Median':>12} {'−Error':>12} {'+Error':>12}\n")
         of.write("-" * 68 + "\n")
-        of.write(f"{a_med:<30.6e} m {a_rsun:>12.4f} R_sun "
-         f"0 0\n")
+        of.write(f"{'a [m]':<30} {a_med:>12.6e} {'a [R_sun]':>12} {a_rsun:>12.4f}\n")
         for label, med, lo, hi in zip(corner_labels, medians, lowers, uppers):
             of.write(f"{label:<30} {med:>12.4f} {lo:>12.4f} {hi:>12.4f}\n")
     logger.info(f"Saved: {txt_file}")

@@ -29,49 +29,84 @@ class Jacobian:
         N = len(self.p_best)
         M = len(self.time)
         J = np.zeros((M, N))
+        uid = uuid.uuid4().hex[:8]
         for j in range(N):
             dp = self.steps[j]
-            p_plus = self.p_best.copy()
+            p_plus  = self.p_best.copy()
             p_minus = self.p_best.copy()
-            p_plus[j] += dp
+            p_plus[j]  += dp
             p_minus[j] -= dp
-            p_plus_model = "p_plus"
-            p_minus_model = "p_minus"
+            p_plus_model  = f"jac_{uid}_plus_{j}"
+            p_minus_model = f"jac_{uid}_minus_{j}"
+            plus_synth    = f"jac_{uid}_plus_dat_{j}"
+            minus_synth   = f"jac_{uid}_minus_dat_{j}"
             adjust_parameters(
                 self.logger, self.base, p_plus_model,
-                self.names, p_plus, [2]*N, set(self.names)
+                self.names, [str(v) for v in p_plus], [2]*N, set(self.names)
             ).change_config()
             adjust_parameters(
                 self.logger, self.base, p_minus_model,
-                self.names, p_minus, [2]*N, set(self.names)
+                self.names, [str(v) for v in p_minus], [2]*N, set(self.names)
             ).change_config()
-            plus_synth = "plus_synth"
-            minus_synth = "minus_synth"
             try:
                 lcurve(self.logger, p_plus_model, self.orig_data, plus_synth).lroche()
                 lcurve(self.logger, p_minus_model, self.orig_data, minus_synth).lroche()
             except Exception as e:
                 self.logger.info(f"Failed to run lroche - {e}")
                 sys.exit(0)
-            f_plus = np.loadtxt(plus_synth, usecols=(2), unpack=True)
-            f_minus = np.loadtxt(minus_synth, usecols=(2), unpack=True)
+            f_plus  = np.loadtxt(plus_synth,  usecols=(2,), unpack=True)
+            f_minus = np.loadtxt(minus_synth, usecols=(2,), unpack=True)
             if len(f_plus) != len(f_minus):
                 self.logger.info("Mismatch in lengths")
                 sys.exit(1)
             for f in [plus_synth, minus_synth, p_plus_model, p_minus_model]:
-                if os.path.exists(f):
+                try:
                     os.remove(f)
-            J[:,j] = (f_plus - f_minus) / (2 * dp)
-        self.logger.info(f"Jacobian - {J}")
+                except OSError:
+                    pass
+            J[:, j] = (f_plus - f_minus) / (2.0 * dp)
+        self.logger.info(f"Jacobian computed, shape={J.shape}")
         return J
 
     def compute_covariance(self) -> tuple[np.ndarray, np.ndarray]:
         self.logger.info("Computing the covariance using the Jacobian")
         J = self.compute_jacobian()
-        W = np.diag(1.0/self.flux_err**2)
-        JTJ = J.T @ W @ J
-        C = np.linalg.pinv(JTJ)
-        self.logger.info(f"Covariance - {C} \n And its error - {np.sqrt(np.diag(C))}")
+        M, N = J.shape
+        W     = np.diag(1.0 / self.flux_err**2)
+        JTJ   = J.T @ W @ J
+        C_raw = np.linalg.pinv(JTJ)
+        # Scale by reduced chi² so uncertainties reflect actual residuals
+        flux_obs  = np.loadtxt(self.orig_data, usecols=(2,), unpack=True)
+        f_best    = np.loadtxt(self.orig_data, usecols=(2,), unpack=True)
+        # recompute best-fit flux via lroche
+        uid = uuid.uuid4().hex[:8]
+        best_model = f"jac_{uid}_best"
+        best_dat   = f"jac_{uid}_best_dat"
+        adjust_parameters(
+            self.logger, self.base, best_model,
+            self.names, [str(v) for v in self.p_best], [2]*N, set(self.names)
+        ).change_config()
+        try:
+            lcurve(self.logger, best_model, self.orig_data, best_dat).lroche()
+            f_best = np.loadtxt(best_dat, usecols=(2,), unpack=True)
+        except Exception as e:
+            for f in [best_model, best_dat]:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            raise RuntimeError(f"lroche failed for best-fit model in covariance scaling: {e}") from e
+        finally:
+            for f in [best_model, best_dat]:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        chi2    = np.sum(((flux_obs - f_best) / self.flux_err) ** 2)
+        dof     = max(M - N, 1)
+        scale   = chi2 / dof
+        C       = scale * C_raw
+        self.logger.info(f"chi2/dof={scale:.3f}, param sigmas={np.sqrt(np.diag(C))}")
         return C, np.sqrt(np.diag(C))
 
 class q_i_degeneracy:

@@ -54,6 +54,7 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
     geom = "0" if fix_geometry else "1"
     grid = dict(BASELINE_GRID) if grid_res is None else dict(grid_res)
 
+    q_val = float(read_param(config, "q"))
     rv_value_changes = []
     if rv_config is not None:
         rvs = xshooter_params(logger, rv_config).load_rv_parameters()
@@ -72,7 +73,10 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         r2 = r2_init
         logger.info(f"Band {band_index}: Using fixed r2 = {r2:.6f} (q = {q_val:.4f})")
 
-    phase1 = (np.arcsin(r1_init + r2) / (2 * np.pi))+0.001
+    iangle = float(read_param(config, "iangle"))
+    sin_i = np.sin(np.radians(iangle))
+    cos_i = np.cos(np.radians(iangle))
+    phase1 = np.arcsin(np.sqrt(max((r1_init + r2)**2 - cos_i**2, 0.0)) / sin_i) / (2 * np.pi) + 0.001
     logger.info(f"Band {band_index}: Calculated phase1 = {phase1:.6f}")
     phase2 = 0.5 - phase1
     logger.info(f"Band {band_index}: Calculated phase2 = {phase2:.6f}")
@@ -88,7 +92,7 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         ("r2", geom, 5),
         ("t1", geom, 5),
         ("t2", geom, 5),
-        ("absorb", "0.5", 2), ("absorb", geom, 5),
+        ("absorb", "0.5", 2), ("absorb", "0", 5),
         # WD limb darkening: set value and lock
         ("ldc1_1", f"{a1}", 2), ("ldc1_1", geom, 5),
         ("ldc1_2", f"{a2}", 2), ("ldc1_2", geom, 5),
@@ -104,30 +108,32 @@ def change_params(logger: logging.Logger, config: str, path: str, period: float,
         ("gravity_dark2", f"{y2}", 2), ("gravity_dark2", geom, 5),
         # 3-part lines: wavelength and beam factors 
         ("wavelength", f"{wavelength}", 2),
-        ("beam_factor1", "0", 5), #("beam_factor1", f"{bf1}", 2), 
-        ("beam_factor2", "0", 5), #("beam_factor2", f"{bf2}", 2), 
+        ("beam_factor1", "0", 5), ("beam_factor1", f"{bf1}", 2), 
+        ("beam_factor2", "0", 5), ("beam_factor2", f"{bf2}", 2), 
         ("iscale", "0" if not fix_geometry else "1", 2),
         ("phase1", f"{phase1:.6f}", 2),
         ("phase2", f"{phase2:.6f}", 2),
-        # Grid resolution — written explicitly so it is never silently inherited
+        # Grid resolution
         ("nlat1f", str(grid["nlat1f"]), 2),
         ("nlat1c", str(grid["nlat1c"]), 2),
         ("nlat2f", str(grid["nlat2f"]), 2),
         ("nlat2c", str(grid["nlat2c"]), 2),
     ]
 
-    if fix_geometry: 
+    if fix_geometry:
         cur_period = read_param(config, "period")
-        cur_vs = read_param(config, "velocity_scale")  
+        cur_vs = read_param(config, "velocity_scale")
+        cur_abs = read_param(config, "absorb")
         changes += [
             ("period",  cur_period, 2), ("period",  "0", 5),
             ("tperiod", cur_period, 2), ("t0", "0", 5),
-            ("velocity_scale", cur_vs, 2),  
+            ("velocity_scale", cur_vs, 2), ("velocity_scale", "0", 5),
+            ("absorb", "0.5", 2), ("absorb", "1" if band_index == 3 else "0", 5),
         ]
     else:
         changes += [
             ("period",  f"{period}", 2), ("period", "1", 5),
-            ("tperiod", f"{period}", 2),                  
+            ("tperiod", f"{period}", 2), 
             ("t0", f"0.0", 2), ("t0", "1", 5), ("r2", f"{r2:.6f}", 2),
         ]
 
@@ -226,68 +232,12 @@ def jitter_grid_search(logger: logging.Logger, model_file: str, data_file: str,
         if chi2 < best_chi2:
             best_chi2 = chi2
             best_grid = dict(grid)
-
-    # clean up temporary files
-    for i in range(n_trials):
-        for f in (f"{pathname}/jitter_trial_{i}", f"{pathname}/jitter_out_{i}"):
-            if os.path.exists(f):
-                os.remove(f)
+        
+        os.remove(trial_model)
+        os.remove(trial_out)
 
     logger.info(f"Best grid from jitter search: {best_grid} (chi2 = {best_chi2:.4f})")
     return best_grid
-
-def log_g_search(logger: logging.Logger, model_file: str, data_file: str, pathname: str, 
-        wd_temp: float, wd_logg: float, wd_logg_err: float, wd_type: str, comp_temp: float, 
-        comp_logg: float, filt: str, period: float, t0_nearby: float, rv_config: str, n_trials=1000) -> dict:
-    flux_data = np.loadtxt(data_file, usecols=2)
-    flux_err  = np.loadtxt(data_file, usecols=3)
-
-    best_chi2 = np.inf
-    best_logg = wd_logg
-
-    upper_limit = wd_logg + wd_logg_err
-    lower_limit = wd_logg - wd_logg_err
-
-    for i in range(n_trials):
-        new_logg = np.random.uniform(lower_limit, upper_limit)
-        claret = claret_tables_interp(logger, wd_temp, new_logg, wd_type, comp_temp, comp_logg, filt)
-        new_wd_ldc = claret.wd_limb_darkening()
-        comp_ldc = claret.comp_limb_darkening()
-        wd_gdc = claret.wd_gravity_darkening()
-        comp_gdc = claret.comp_gravity_darkening()
-
-        names = [f"ldc1_1", f"ldc1_2", f"ldc1_3", f"ldc1_4", f"ldc2_1", f"ldc2_2", f"ldc2_3", f"ldc2_4", "gravity_dark1", "gravity_dark2"]
-        values = [new_wd_ldc[0], new_wd_ldc[1], new_wd_ldc[2], new_wd_ldc[3], comp_ldc[0], comp_ldc[1], comp_ldc[2], comp_ldc[3], wd_gdc, comp_gdc]
-        indices = [2] * len(names)
-        ew = effective_wavelength(logger, 3)
-        wavelength = ew.pivot_wave()
-        i_band_config = change_params(
-                logger, model_file, pathname, period, t0_nearby, 3,
-                new_wd_ldc, comp_ldc, wd_gdc, comp_gdc, wavelength, "0", "0", rv_config, True,
-                grid_res=None
-            )
-        trial_model = f"{pathname}/logg_trial_{i}"
-        trial_out   = f"{pathname}/logg_out_{i}"
-        cfg_path = adjust_parameters( 
-            logger, i_band_config, trial_model, names, values, indices, set(names)
-        ).change_config()
-        lcurve(logger, cfg_path, data_file, trial_out).lroche()
-
-        flux_model = np.loadtxt(trial_out, usecols=2)
-        chi2 = float(np.sum(((flux_data - flux_model) / flux_err) ** 2))
-        logger.info(f"Log g trial {i+1}/{n_trials}: {new_logg} -> chi2 = {chi2:.4f}")
-
-        if chi2 < best_chi2:
-            best_chi2 = chi2
-            best_logg = new_logg
-
-    for i in range(n_trials):
-        for f in (f"{pathname}/logg_trial_{i}", f"{pathname}/logg_out_{i}"):
-            if os.path.exists(f):
-                os.remove(f)
-
-    logger.info(f"Best log g from search: {best_logg} (chi2 = {best_chi2:.4f})")
-    return best_logg
 
 
 def run(cfg: dict, logger: logging.Logger) -> None:
@@ -328,21 +278,18 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     results = {}
     reference_model = None
     best_grid = None
-    best_logg = None
+    best_logg = wd_logg
     for band_idx in band_order:
         model_file, time, flux_norm, flux_err_norm, time_model, flux_model, t0_nearby, oot_norm_jy = \
-            _run(band_idx, reference_model, example_model, best_grid, new_logg=best_logg if best_logg is not None else wd_logg)
+            _run(band_idx, reference_model, example_model, best_grid, new_logg=wd_logg)
 
         if band_idx == 2:
-            # search for best grid using the converged g-band result
-            data_file_g = f"{pathname}/{tar_name}_ultracam_data_file_3"
-            best_logg = log_g_search(logger, model_file, data_file_g, pathname, wd_temp, wd_logg, wd_logg_err, wd_type, comp_temp, comp_logg, "i'", period, t0_nearby, rv_config)
-            logger.info(f"Re-running g-band simplex with best log g: {best_logg}")
+            data_file_g = f"{pathname}/{tar_name}_ultracam_data_file_2"
             best_grid = jitter_grid_search(logger, model_file, data_file_g, pathname)
             logger.info(f"Re-running g-band simplex with best grid: {best_grid}")
-            model_file, time, flux_norm, flux_err_norm, time_model, flux_model, t0_nearby, oot_norm_jy = \
+            new_model_file, time, flux_norm, flux_err_norm, time_model, flux_model, t0_nearby, oot_norm_jy = \
                 _run(band_idx, None, model_file, best_grid, best_logg)
-            reference_model = model_file
+            reference_model = new_model_file
             logger.info("Using g-band geometry (best grid) for subsequent fits")
 
         results[band_idx] = {
