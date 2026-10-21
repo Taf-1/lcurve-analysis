@@ -322,10 +322,18 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
         lp += -0.5 * ((Kscale - rvs["K2"][0]) / rvs["K2"][1]) ** 2
         lp += -0.5 * ((Kscale * p["q"] - rvs["K1"][0]) / rvs["K1"][1]) ** 2
         logger.debug(f"RV prior: Kscale = {Kscale:.3f}, K2_pred = {rvs['K2'][0]:.3f}, K1_pred = {rvs['K1'][0]:.3f}, lp_K={-0.5 * ((Kscale - rvs['K2'][0]) / rvs['K2'][1]) ** 2 + -0.5 * ((Kscale * p['q'] - rvs['K1'][0]) / rvs['K1'][1]) ** 2:.3f}, total={lp:.3f}")
+
         # remove degeneracy between scaled radii and i 
         grav_red, grav_red_err = grav_red_prior(rv_config)
         r_sin3i = (P_s * 0.635 * rvs["K2"][0] * K_total**2) / (2 * np.pi * grav_red * const.G.value)
-        # TODO: Propagate the r_sin3i uncertainty - then add a prior on the scaled radii based on this value
+        A = K_total**2
+        A_err = 2 * K_total * (np.sqrt(rvs["K1"][1]**2 + rvs["K2"][1]**2))
+        B = rvs["K2"][0] * A
+        B_err = B * np.sqrt((rvs["K2"][1]/rvs["K2"][0])**2 + (A_err/A)**2)
+        C = B / grav_red
+        C_err = C * np.sqrt((B_err/B)**2 + (grav_red_err/grav_red)**2)
+        r_sin3i_err = C_err * (P_s * 0.635) / (2 * np.pi * const.G.value)
+        lp += -0.5 * ((p["r1"] * a_rsun * np.sin(np.radians(p["iangle"]))**3 - r_sin3i) / r_sin3i_err) ** 2
 
     lp_tspec = 0.0
     lp_t1_spec = 0.0
@@ -732,7 +740,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         steps_mcmc[i_idx] = np.sin(np.radians(iangle0)) * np.radians(0.01)
 
     nwalkers   = 4 * ndim
-    mcmc_steps = 5000
+    mcmc_steps = 1000
     rng = np.random.default_rng()
     p0 = p_best + steps_mcmc * rng.standard_normal((nwalkers, ndim))
 
@@ -794,7 +802,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         plt.close(fig)
         logger.info(f"Saved: {data_dir}/{mcmc_steps}_{names[i]}_walker_traj.png")
 
-    discard = 15000
+    discard = 150
     tau = sampler.get_autocorr_time(discard=discard, tol=50, quiet=True)
     logger.info(f"Autocorrelation time: {tau}")
     #discard = min(int(5 * np.nanmax(tau)), max(0, mcmc_steps - 50))
