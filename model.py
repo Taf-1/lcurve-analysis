@@ -315,8 +315,8 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
         rvs    = xs.load_rv_parameters()
         Kscale = K_total / (1.0 + p["q"])
         vs  = K_total / np.sin(np.radians(p["iangle"]))
-        P_s = (period * u.day).to(u.s)
-        a_m = (vs * 1e3 * P_s.value / (2.0 * np.pi)) * u.m
+        P_s = (period * u.day).to(u.s).value
+        a_m = (vs * 1e3 * P_s / (2.0 * np.pi)) * u.m 
         a_med  = np.median(a_m.value)
         a_rsun = (a_med * u.m).to(u.R_sun).value
         lp += -0.5 * ((Kscale - rvs["K2"][0]) / rvs["K2"][1]) ** 2
@@ -334,6 +334,11 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
         C_err = C * np.sqrt((B_err/B)**2 + (grav_red_err/grav_red)**2)
         r_sin3i_err = C_err * (P_s * 0.635) / (2 * np.pi * const.G.value)
         lp += -0.5 * ((p["r1"] * a_rsun * np.sin(np.radians(p["iangle"]))**3 - r_sin3i) / r_sin3i_err) ** 2
+
+        if f_ratio_obs is not None and f_ratio_err is not None:
+            a_coeff = (0.15 * (15.0 + u_ms) * (1.0 + b_ms)) / (3.0 - u_ms)
+            f_ratio_pred = a_coeff * (p["r2"]) ** 3 * (rvs["K2"][0] / rvs["K1"][0]) * np.sin(np.radians(p["iangle"])) ** 2
+            lp += -0.5 * ((f_ratio_pred - f_ratio_obs) / f_ratio_err) ** 2 + np.log(2*np.pi*f_ratio_err**2)
 
     lp_tspec = 0.0
     lp_t1_spec = 0.0
@@ -363,11 +368,6 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
             lp_tspec += -0.5 * ((p["r2"] - (mu/a_rsun)) / (sigma/a_rsun)) ** 2
 
     lp += lp_tspec
-
-    if f_ratio_obs is not None and f_ratio_err is not None:
-        a_coeff = (0.15 * (15.0 + u_ms) * (1.0 + b_ms)) / (3.0 - u_ms)
-        f_ratio_pred = a_coeff * (p["r2"]) ** 3 * (rvs["K2"][0] / rvs["K1"][0]) * np.sin(np.radians(p["iangle"])) ** 2
-        lp += -0.5 * ((f_ratio_pred - f_ratio_obs) / f_ratio_err) ** 2 + np.log(2*np.pi*f_ratio_err**2)
 
     return lp
 
