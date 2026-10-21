@@ -269,7 +269,7 @@ def ellips_modu_coeff(flux_model: np.ndarray, flux: np.ndarray, flux_err: np.nda
                     break
     return f_ratio, max_flux_err, u_ms, b_ms
 
-def grav_red_prior(rv_config: str) -> tuple[float, float]:
+def grav_red_prior(logger: logging.Logger, rv_config: str) -> tuple[float, float]:
     if rv_config is None:
         return 0.0, 0.0
     xs = xshooter_params(logger, rv_config)
@@ -324,7 +324,7 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
         logger.debug(f"RV prior: Kscale = {Kscale:.3f}, K2_pred = {rvs['K2'][0]:.3f}, K1_pred = {rvs['K1'][0]:.3f}, lp_K={-0.5 * ((Kscale - rvs['K2'][0]) / rvs['K2'][1]) ** 2 + -0.5 * ((Kscale * p['q'] - rvs['K1'][0]) / rvs['K1'][1]) ** 2:.3f}, total={lp:.3f}")
 
         # remove degeneracy between scaled radii and i 
-        grav_red, grav_red_err = grav_red_prior(rv_config)
+        grav_red, grav_red_err = grav_red_prior(logger, rv_config)
         r_sin3i = (P_s * 0.635 * rvs["K2"][0] * K_total**2) / (2 * np.pi * grav_red * const.G.value)
         A = K_total**2
         A_err = 2 * K_total * (np.sqrt(rvs["K1"][1]**2 + rvs["K2"][1]**2))
