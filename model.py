@@ -269,6 +269,17 @@ def ellips_modu_coeff(flux_model: np.ndarray, flux: np.ndarray, flux_err: np.nda
                     break
     return f_ratio, max_flux_err, u_ms, b_ms
 
+def grav_red_prior(rv_config: str) -> tuple[float, float]:
+    if rv_config is None:
+        return 0.0, 0.0
+    xs = xshooter_params(logger, rv_config)
+    rvs = xs.load_rv_parameters()
+    v_sys1, vsy2 = rvs["vsys1"][0], rvs["vsys2"][0]
+    v_sys_err1, v_sys_err2 = rvs["vsys1"][1], rvs["vsys2"][1]
+    grav_red = v_sys1 - vsy2
+    grav_red_err = np.sqrt(v_sys_err1**2 + v_sys_err2**2)
+    return grav_red, grav_red_err
+
 def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
               period: float, wd_logg: float | None, wd_logg_err: float | None,
               logger: logging.Logger,
@@ -289,7 +300,7 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
     if not (78 < p["iangle"] < 90):      return -np.inf
     if not (0.001 < p["r1"]  < 0.05):    return -np.inf
     if not (0.01 < p["r2"]  < 0.5):   return -np.inf
-    if not (9800  < p["t1"]  < 12750):   return -np.inf
+    if not (9500  < p["t1"]  < 12750):   return -np.inf
     if not (2000  < p["t2"]  < 3000):    return -np.inf
     if "q" not in p or p["q"] <= 0:
         return -np.inf
@@ -299,7 +310,6 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
     if K_total <= 0.0:
         return lp
 
-    # --- RV constraints ---
     if rv_config is not None:
         xs     = xshooter_params(logger, rv_config, p["iangle"])
         rvs    = xs.load_rv_parameters()
@@ -312,6 +322,10 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
         lp += -0.5 * ((Kscale - rvs["K2"][0]) / rvs["K2"][1]) ** 2
         lp += -0.5 * ((Kscale * p["q"] - rvs["K1"][0]) / rvs["K1"][1]) ** 2
         logger.debug(f"RV prior: Kscale = {Kscale:.3f}, K2_pred = {rvs['K2'][0]:.3f}, K1_pred = {rvs['K1'][0]:.3f}, lp_K={-0.5 * ((Kscale - rvs['K2'][0]) / rvs['K2'][1]) ** 2 + -0.5 * ((Kscale * p['q'] - rvs['K1'][0]) / rvs['K1'][1]) ** 2:.3f}, total={lp:.3f}")
+        # remove degeneracy between scaled radii and i 
+        grav_red, grav_red_err = grav_red_prior(rv_config)
+        r_sin3i = (P_s * 0.635 * rvs["K2"][0] * K_total**2) / (2 * np.pi * grav_red * const.G.value)
+        # TODO: Propagate the r_sin3i uncertainty - then add a prior on the scaled radii based on this value
 
     lp_tspec = 0.0
     lp_t1_spec = 0.0
@@ -344,7 +358,7 @@ def log_prior(params: np.ndarray, names: list[str], rv_config: str | None,
 
     if f_ratio_obs is not None and f_ratio_err is not None:
         a_coeff = (0.15 * (15.0 + u_ms) * (1.0 + b_ms)) / (3.0 - u_ms)
-        f_ratio_pred = a_coeff * (p["r2"]) ** 3 * (1 / p["q"]) * np.sin(np.radians(p["iangle"])) ** 2
+        f_ratio_pred = a_coeff * (p["r2"]) ** 3 * (rvs["K2"][0] / rvs["K1"][0]) * np.sin(np.radians(p["iangle"])) ** 2
         lp += -0.5 * ((f_ratio_pred - f_ratio_obs) / f_ratio_err) ** 2 + np.log(2*np.pi*f_ratio_err**2)
 
     return lp
@@ -434,9 +448,9 @@ def plot_ellipsoidal_signal(logger: logging.Logger, fig_name: str, results: dict
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 8),
                                    gridspec_kw={'height_ratios': [3, 1], 'hspace': 0.0})
-    ax1.plot(phase_model, flux_model, 'k-', lw=2, zorder=5, label='Model')
+    ax1.plot(phase_model, flux_model, 'k-', lw=2, zorder=5)
     ax1.errorbar(phase, flux, yerr=flux_err, fmt='o', color='red',
-                 markersize=3, alpha=0.7, zorder=3, label='i-band data')
+                 markersize=3, alpha=0.7, zorder=3)
 
     oot_mask = res['flux'] > 0.85
     oot_flux = flux[oot_mask]
@@ -459,7 +473,6 @@ def plot_ellipsoidal_signal(logger: logging.Logger, fig_name: str, results: dict
     ax1.set_xlim(0, 1)
     ax2.set_xlim(0, 1)
     plt.tight_layout()
-    ax1.legend()
     plt.savefig(f"{fig_name}.png", bbox_inches='tight', dpi=300)
     plt.savefig(f"{fig_name}.pdf", bbox_inches='tight', dpi=300)
     plt.close(fig)
@@ -750,7 +763,7 @@ def run(cfg: dict, logger: logging.Logger) -> None:
             (emcee.moves.DESnookerMove(), 0.2),
         ]
 
-    with Pool(processes=24) as pool:
+    with Pool(processes=40) as pool:
         sampler = emcee.EnsembleSampler(
             nwalkers, ndim, log_probability,
             args=(names, data_dir, rv_config, gaia_id, band_order, a_r_sun, period,
@@ -781,69 +794,12 @@ def run(cfg: dict, logger: logging.Logger) -> None:
         plt.close(fig)
         logger.info(f"Saved: {data_dir}/{mcmc_steps}_{names[i]}_walker_traj.png")
 
-    discard = 1000
+    discard = 15000
     tau = sampler.get_autocorr_time(discard=discard, tol=50, quiet=True)
     logger.info(f"Autocorrelation time: {tau}")
     #discard = min(int(5 * np.nanmax(tau)), max(0, mcmc_steps - 50))
-    thin    = max(1, int(0.5 * np.nanmax(tau))) if np.any(np.isfinite(tau)) else 1
-    if thin > (mcmc_steps - discard):
-        thin = 1
-        logger.info("Short run: thinning disabled — using all post-discard samples")
-
-    log_prob_chain = sampler.get_log_prob()
-    mean_lp = np.mean(log_prob_chain[discard:], axis=0)
-    lp_med  = np.median(mean_lp)
-    lp_mad  = np.median(np.abs(mean_lp - lp_med))
-    good_lp = mean_lp > lp_med - 5 * lp_mad
-
-    # Movement-based walker diagnostics (thin=1 to catch every step).
-    # A walker that is truly frozen shows zero coordinate changes even if emcee
-    # reports a non-zero acceptance fraction (e.g. proposals accepted but all
-    # identical due to prior boundary clamping).
-    post_raw = sampler.get_chain(discard=discard, thin=1)   # (nsteps, nwalkers, ndim)
-    lp_raw   = sampler.get_log_prob(discard=discard, thin=1)
-    moved    = np.any(post_raw[1:] != post_raw[:-1], axis=2)  # (nsteps-1, nwalkers)
-
-    move_frac     = moved.mean(axis=0)
-    longest_stall = np.array([
-        np.max(np.diff(np.flatnonzero(np.r_[True, moved[:, j], True])) - 1)
-        for j in range(post_raw.shape[1])
-    ])
-    finite_logp = np.array([np.all(np.isfinite(lp_raw[:, j])) for j in range(post_raw.shape[1])])
-
-    logger.info("Walker diagnostics (post-discard, thin=1):")
-    logger.info(f"{'walker':>6}  {'moves':>5}  {'move_frac':>9}  {'longest_stall':>13}  {'finite_logp':>11}")
-    for j in range(post_raw.shape[1]):
-        logger.info(
-            f"{j:6d}  {int(moved[:, j].sum()):5d}  "
-            f"{move_frac[j]:9.3f}  "
-            f"{int(longest_stall[j]):13d}  "
-            f"{str(finite_logp[j]):>11}"
-        )
-
-    # Three-way filter: log-prob outlier, acceptance fraction, actual movement.
-    acc_threshold  = 0.10
-    move_threshold = 0.05   # walker must move on >= 5% of post-discard steps
-    good_acc  = acc >= acc_threshold
-    good_move = move_frac >= move_threshold
-    good_walkers = good_lp & good_acc & good_move
-    n_bad_lp   = (~good_lp).sum()
-    n_bad_acc  = (~good_acc).sum()
-    n_bad_move = (~good_move).sum()
-    n_bad      = (~good_walkers).sum()
-    logger.info(
-        f"Walker filter: removed {n_bad}/{nwalkers_out} walkers "
-        f"({n_bad_lp} log-prob outliers, {n_bad_acc} frozen acc<{acc_threshold:.0%}, "
-        f"{n_bad_move} frozen move<{move_threshold:.0%}); "
-        f"acc range [{acc.min():.3f}, {acc.max():.3f}], "
-        f"move_frac range [{move_frac.min():.3f}, {move_frac.max():.3f}]"
-    )
-
-    logger.info(f"Discarding {discard} burn-in steps, thinning by {thin}")
-
-    full_chain = sampler.get_chain(discard=discard, thin=thin)
-    samples    = full_chain[:, good_walkers, :].reshape(-1, ndim_out)
-
+    thin = 10
+    samples = sampler.get_chain(discard=discard, thin=thin, flat=True)
     if "cos_i" in names:
         cos_i_s = samples[:, i_idx].copy()
         b2_s    = cos_i_s ** 2
@@ -892,31 +848,45 @@ def run(cfg: dict, logger: logging.Logger) -> None:
     m2_samples = q_samples * m1_samples
 
     _CORNER_LABEL = {
-        "iangle":          r"$i\ [^\circ]$",
+        "iangle":          r"$i\ (^\circ)$",
         "r1":              r"$r_1/a$",
         "r2":              r"$r_2/a$",
-        "t1":              r"$T_1\ [K]$",
-        "t2":              r"$T_2\ [K]$",
+        "t1":              r"$T_1\ (K)$",
+        "t2":              r"$T_2\ (K)$",
     }
     keep_cols        = [j for j, n in enumerate(names) if n != "q"]
     corner_names     = [names[j] for j in keep_cols]
     samples_phys     = samples[:, keep_cols]
     samples_extended = np.hstack([m1_samples[:, None], m2_samples[:, None], samples_phys])
     corner_labels    = (
-        [r'$M_{\rm WD}\ [M_\odot]$', r'$M_{\rm comp}\ [M_\odot]$']
+        [r'$M_{\rm WD}\ (M_\odot)$', r'$M_{\rm comp}\ (M_\odot)$']
         + [_CORNER_LABEL.get(n, n) for n in corner_names]
     )
     param_med_corner = np.median(samples_extended, axis=0)
+    ndim = samples_extended.shape[1]
+    rng = [tuple(np.percentile(samples_extended[:, k], [0.05, 99.95]))
+        for k in range(ndim)]
+
+    levels = 1 - np.exp(-0.5 * np.arange(1, 4)**2)
     cornerfig = corner.corner(
-        samples_extended, labels=corner_labels, truths=param_med_corner,
-        show_titles=False, title_fmt=".2f",
-        label_kwargs={"fontsize": 40}, title_kwargs={"fontsize":40},
-        fig=plt.figure(figsize=(40, 40))
+        samples_extended, labels=corner_labels,
+        levels=levels,
+        bins=20,                  # default; no smoothing
+        plot_datapoints=True,
+        plot_density=True,
+        quantiles=[0.16, 0.5, 0.84],
+        plot_contours=True,
+        fill_contours=False,
+        data_kwargs={"alpha": 0.5, "ms": 3},  # darker, larger scatter
+        label_kwargs={"fontsize": 26},
+        fig=plt.figure(figsize=(20, 20)),
     )
     for ax in cornerfig.get_axes():
-        ax.tick_params(labelsize=35)
-    cornerfig.savefig(f"{data_dir}/model_corner_plot.png", dpi=300)
-    cornerfig.savefig(f"{data_dir}/model_corner_plot.pdf", dpi=300)
+        ax.tick_params(labelsize=18)
+
+    cornerfig.subplots_adjust(left=0.07, right=0.99, bottom=0.07, top=0.99)
+    cornerfig.savefig(f"{data_dir}/model_corner_plot.png", dpi=300, bbox_inches="tight", pad_inches=0.1)
+    cornerfig.savefig(f"{data_dir}/model_corner_plot.pdf", dpi=300, bbox_inches="tight", pad_inches=0.1)
     logger.info(f"Saved: {data_dir}/model_corner_plot.png/.pdf")
     plt.close(cornerfig)
 
